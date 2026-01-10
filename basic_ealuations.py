@@ -13,8 +13,7 @@ from pose_metrics import (
     chamfer_distance,
     mssd,
     mspd,
-    adi,
-    add
+    adi
 )
 
 
@@ -46,13 +45,14 @@ if __name__ == '__main__':
     # Configuration
     # ========================================================================
     gt_mesh_file = '/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj'
-    est_mesh_file = gt_mesh_file
+    est_mesh_file = 'debug/attached_mesh.obj'
+    #est_mesh_file = '/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/instantmesh/mesh.obj'
     pose_file = "/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/ob_in_cams.txt"
     est_poses_dir = "debug/ob_in_cam/*.txt"
     meta_file = "/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/meta/0000.pkl"
     
     # Flags
-    use_gt_mesh = False  # Set to True to use efficient single-mesh functions
+    use_gt_mesh = False  # Set to True to use single-mesh metrics
     debug = 0  # 0: normal, 1: print variance and save summary, 2: save per-frame results
     output_dir = 'debug/evaluation_results'  # Used when debug>=1
     
@@ -90,7 +90,6 @@ if __name__ == '__main__':
     # Initialize metric storage
     # ========================================================================
     metrics = {
-        'ADD': 0.0,
         'ADI': 0.0,
         '3D_IOU': 0.0,
         'Chamfer': 0.0,
@@ -122,10 +121,6 @@ if __name__ == '__main__':
         frame_metrics = {}
         
         if use_gt_mesh:
-            # ADD metric
-            add_error = add(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, pts=pts)
-            frame_metrics['ADD'] = add_error
-            
             # ADI metric
             adi_error = adi(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, pts=pts)
             frame_metrics['ADI'] = adi_error
@@ -148,13 +143,7 @@ if __name__ == '__main__':
             mspd_val = mspd(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, K=K, pts=pts, syms=syms)
             frame_metrics['MSPD'] = mspd_val
             
-        else:
-            # ADD metric (compute manually)
-            pts_est_t = transform_pts_Rt(pts_est_orig, R_est, t_est)
-            pts_gt_t = transform_pts_Rt(pts_gt_orig, R_gt, t_gt)
-            add_error = np.linalg.norm(pts_est_t - pts_gt_t, axis=1).mean()
-            frame_metrics['ADD'] = add_error
-            
+        else:            
             # ADI metric (returns IOU and error)
             iou, adi_error = adi_est(R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig)
             frame_metrics['ADI'] = adi_error
@@ -228,7 +217,6 @@ if __name__ == '__main__':
         print(f"\n{'='*60}")
         print(f"Evaluation Results ({n_frames} frames)")
         print(f"{'='*60}")
-        print(f"ADD (Average Distance):        {metrics['ADD']:.4f} mm")
         print(f"ADI (Average Distance):        {metrics['ADI']:.4f} mm")
         print(f"3D IOU:                        {metrics['3D_IOU']:.3f} %")
         print(f"Chamfer Distance:              {metrics['Chamfer']:.4f} mm")
@@ -238,7 +226,6 @@ if __name__ == '__main__':
         print(f"\n{'='*60}")
         print("Variance Statistics")
         print(f"{'='*60}")
-        print(f"ADD Variance:                  {metrics['ADD']:.6f} mm  ±{std_devs['ADD']:.4f}")
         print(f"ADI Variance:                  {metrics['ADI']:.6f} mm  ±{std_devs['ADI']:.4f}")
         print(f"3D IOU Variance:               {metrics['3D_IOU']:.5f} %  ±{std_devs['3D_IOU']:.4f}")
         print(f"Chamfer Distance Variance:     {metrics['Chamfer']:.6f} mm  ±{std_devs['Chamfer']:.4f}")

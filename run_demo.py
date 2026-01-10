@@ -14,7 +14,8 @@ import argparse
 
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj')
+  parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/instantmesh/mesh.obj')
+  #parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj')
   parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14')
   parser.add_argument('--est_refine_iter', type=int, default=5)
   parser.add_argument('--track_refine_iter', type=int, default=2)
