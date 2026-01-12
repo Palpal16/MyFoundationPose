@@ -93,7 +93,7 @@ def resize_mesh(mesh, new_diameter, reverse=False, diameter=None, mesh_unseen=No
       mesh.vertices -= center
       if mesh_unseen is not None:
         mesh_unseen.vertices -= center
-      print(f"original diameter: {diameter}, new diameter: {new_diameter}")
+      logging.info(f"original diameter: {diameter}, new diameter: {new_diameter}")
 
     mesh.vertices *= new_diameter / diameter
     if mesh_unseen is not None:
@@ -128,7 +128,7 @@ def compute_mesh_diameter(mesh):
     return float(diameter)
 
 
-def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, additional_scale=1.2):
+def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, additional_scale=1.2, gt_mesh_file=None):
     """Estimate mesh scale from depth observation and resize mesh accordingly
     
     Args:
@@ -146,7 +146,8 @@ def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, a
     depth = reader.get_depth(0)
     mask = reader.get_mask(0).astype(bool)
     guessed_mesh_diameter = estimate_max_length(depth, mask, reader.K)
-    
+    logging.info(f"Depth + mask diameter, without additional scalining: {guessed_mesh_diameter:.4f}m")
+
     # Apply constraints and scaling
     guessed_mesh_diameter = min(guessed_mesh_diameter * scale_factor, max_diameter)
     guessed_mesh_diameter = guessed_mesh_diameter * additional_scale
@@ -154,21 +155,28 @@ def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, a
     logging.info(f"Estimated mesh diameter from depth: {guessed_mesh_diameter:.4f}m")
     
     # Scale mesh to estimated diameter
-    scaled_mesh, _, actual_diameter = resize_mesh(mesh, new_diameter=guessed_mesh_diameter, reverse=True)
+    scaled_mesh, _, scaled_diameter = resize_mesh(mesh, new_diameter=guessed_mesh_diameter, reverse=True)
     
     logging.info(f"Mesh scaled to diameter: {compute_mesh_diameter(scaled_mesh):.4f}m")
-    
-    return scaled_mesh, guessed_mesh_diameter
+
+    if gt_mesh_file:
+       true_mesh_diameter = guessed_mesh_diameter * compute_mesh_diameter(gt_mesh_file) / compute_mesh_diameter(scaled_mesh)
+    else:
+        true_mesh_diameter = guessed_mesh_diameter **2 / compute_mesh_diameter(scaled_mesh)
+    rescaled_mesh, _, rescaled_diameter = resize_mesh(scaled_mesh, new_diameter=true_mesh_diameter, reverse=True)
+    logging.info(f"scaled_mesh diameter: {compute_mesh_diameter(rescaled_mesh)}")
+
+    return rescaled_mesh, rescaled_diameter
 
 
-def rgb_depth_to_mesh_frame(pose, reader, frame_idx, boundary_distance_px=10):
+def rgb_depth_to_mesh_frame(pose, reader, frame_idx, boundary_distance_px=30):
     """Convert RGB-D image to point cloud in mesh frame, excluding pixels near mask boundary
     
     Args:
         pose: 4x4 object-in-camera pose matrix
         reader: Data reader object
         frame_idx: Frame index to process
-        boundary_distance_px: minimum distance from boundary in pixels (default: 10)
+        boundary_distance_px: minimum distance from boundary in pixels (default: 30)
     
     Returns:
         points_in_mesh: (N,3) 3D points in mesh frame
@@ -177,70 +185,32 @@ def rgb_depth_to_mesh_frame(pose, reader, frame_idx, boundary_distance_px=10):
     rgb = reader.get_color(frame_idx)
     depth = reader.get_depth(frame_idx)
     mask = reader.get_mask(frame_idx).astype(bool)
-    
-    # Compute distance transform: each pixel = distance to nearest boundary
+    depth[~mask]=0
+
+    # Convert depth to 3D points in camera frame
+    xyz_map = depth2xyzmap(depth, reader.K)  # (H,W,3)
+
+    # Compute distance transform: each pixel = distance to nearest mask boundary
     dist_transform = distance_transform_edt(mask)
     
-    # Keep only pixels sufficiently far from boundary
+    # Evaluate the confidence based on the distance (interior points have more confidence)
     interior_mask = dist_transform > boundary_distance_px
+    mask_without_edge = dist_transform > 5
+    confidence_values = np.zeros(depth.shape, dtype=np.float32)
+    confidence_values[mask_without_edge]=0.1
+    confidence_values[interior_mask]=0.3
     
-    # Zero out depth outside interior region
-    depth[~interior_mask] = 0
-    
-    # 1. Convert depth to 3D points in camera frame
-    xyz_map = depth2xyzmap(depth, reader.K)  # (H,W,3)
-    
-    # 2. Extract valid points from interior
-    valid = depth > 0.1
+    # Extract valid points from interior
+    valid = depth > 0.001
     points_cam = xyz_map[valid]  # (N,3)
     colors = rgb[valid]  # (N,3)
+    confidence_values = confidence_values[valid]  # (N)
     
-    # 3. Transform from camera frame to mesh frame
+    # Transform from camera frame to mesh frame
     cam_in_object = np.linalg.inv(pose)
     points_in_mesh = transform_pts(points_cam, cam_in_object)
     
-    return points_in_mesh, colors
-
-
-def update_mesh_from_pointcloud(mesh_in, point_cloud_xyz, point_cloud_rgb, indices):
-    """Update mesh vertices with averaged positions and colors from assigned point cloud points.
-    
-    Args:
-        mesh_in: trimesh object
-        point_cloud_xyz: (N, 3) point cloud coordinates
-        point_cloud_rgb: (N, 3) point cloud colors [0-255] or [0-1]
-        indices: (N,) indices from KDTree query
-    """
-    mesh = mesh_in.copy()
-    n_vertices = len(mesh.vertices)
-    
-    # Accumulate sums and counts for each vertex
-    vertex_xyz_sum = np.zeros((n_vertices, 3))
-    vertex_rgb_sum = np.zeros((n_vertices, 3))
-    vertex_counts = np.zeros(n_vertices)
-    
-    # Accumulate point cloud values to their assigned vertices
-    np.add.at(vertex_xyz_sum, indices, point_cloud_xyz)
-    np.add.at(vertex_rgb_sum, indices, point_cloud_rgb)
-    np.add.at(vertex_counts, indices, 1)
-    
-    # Find vertices with at least one assignment
-    assigned_mask = vertex_counts > 0
-    
-    # Update positions
-    mesh.vertices[assigned_mask] = vertex_xyz_sum[assigned_mask] / vertex_counts[assigned_mask, None]
-    
-    # Update colors
-    vertex_colors = np.zeros((n_vertices, 4), dtype=np.uint8)
-    vertex_colors[:, 3] = 255  # Alpha channel
-    vertex_colors[assigned_mask, :3] = (vertex_rgb_sum[assigned_mask] / vertex_counts[assigned_mask, None]).astype(np.uint8)
-    
-    mesh.visual.vertex_colors[assigned_mask] = vertex_colors[assigned_mask]
-    
-    logging.info(f"Updated {assigned_mask.sum()}/{len(mesh.vertices)} vertices")
-    
-    return mesh
-
+    return points_in_mesh, colors, confidence_values
 
 def smooth_mesh_taubin(mesh, iterations=10, lambda_factor=0.5, mu_factor=-0.53):
     """Apply Taubin smoothing to mesh vertices
@@ -289,12 +259,138 @@ def smooth_mesh_taubin(mesh, iterations=10, lambda_factor=0.5, mu_factor=-0.53):
     return mesh
 
 
-def perform_attachment(est, mesh, pose, reader, frame_idx):
+class MeshWithConfidence:
+    """Mesh wrapper that tracks vertex confidence for confidence-weighted updates"""
+    
+    def __init__(self, mesh):
+        """Initialize mesh with confidence tracking
+        Args:
+            mesh: trimesh object
+        """
+        self.mesh = mesh.copy()
+        
+        # Confidence tracking (0 = unobserved, 1 = frozen/certain)
+        self.confidence = np.zeros(len(mesh.vertices), dtype=np.float32)
+        
+        # Observed data (accumulated but not yet committed to mesh)
+        self.observed_positions = self.mesh.vertices.copy()
+        self.observed_colors = self.mesh.visual.vertex_colors[:, :3].copy().astype(np.float32)
+
+
+def update_mesh_from_pointcloud(CMesh, point_cloud_xyz, point_cloud_rgb, point_cloud_conf, indices, dissimilarity_threshold=0.02):
+    """Update mesh vertices with averaged positions and colors from assigned point cloud points.
+    
+    Args:
+        CMesh: MeshWithConfidence object
+        point_cloud_xyz: (N, 3) point cloud coordinates
+        point_cloud_rgb: (N, 3) point cloud colors [0-255] or [0-1]
+        point_cloud_conf: (N,) confidence values
+        indices: (N,) indices from KDTree query
+        dissimilarity_threshold: max distance to accept observation (default: 0.02m)
+    """
+    n_vertices = len(CMesh.mesh.vertices)
+    
+    # Accumulate sums and counts for each vertex
+    vertex_xyz_sum = np.zeros((n_vertices, 3))
+    vertex_rgb_sum = np.zeros((n_vertices, 3))
+    vertex_conf_sum = np.zeros(n_vertices)
+    vertex_counts = np.zeros(n_vertices)
+    
+    # Accumulate point cloud values to their assigned vertices
+    np.add.at(vertex_xyz_sum, indices, point_cloud_xyz)
+    np.add.at(vertex_rgb_sum, indices, point_cloud_rgb)
+    np.add.at(vertex_conf_sum, indices, point_cloud_conf)
+    np.add.at(vertex_counts, indices, 1)
+    
+    # Find vertices with at least one assignment
+    assigned_mask = vertex_counts > 0
+    
+    # Take the mean
+    vertex_xyz_sum[assigned_mask] = vertex_xyz_sum[assigned_mask] / vertex_counts[assigned_mask, None]
+    vertex_colors = np.zeros((n_vertices, 4), dtype=np.uint8)
+    vertex_colors[:, 3] = 255  # Alpha channel
+    vertex_colors[assigned_mask, :3] = (vertex_rgb_sum[assigned_mask] / vertex_counts[assigned_mask, None]).astype(np.uint8)
+    vertex_conf_sum[assigned_mask] = vertex_conf_sum[assigned_mask] / vertex_counts[assigned_mask]
+
+    # Create masks for different update strategies
+    replace_mask = assigned_mask & (CMesh.confidence == 0.)
+    update_mask = assigned_mask & (CMesh.confidence > 0) & (CMesh.confidence < 1)
+
+    # REPLACE: First time observing these vertices - update observed data
+    CMesh.observed_positions[replace_mask] = vertex_xyz_sum[replace_mask]
+    CMesh.observed_colors[replace_mask] = vertex_colors[replace_mask, :3].astype(np.float32)
+    CMesh.confidence[replace_mask] = vertex_conf_sum[replace_mask]
+
+    # UPDATE: Previously observed vertices
+    if np.any(update_mask):
+        # Compute distance between current observed estimate and new observation
+        distances = np.linalg.norm(
+            CMesh.observed_positions[update_mask] - vertex_xyz_sum[update_mask], 
+            axis=1
+        )
+        
+        # Create full-size dissimilarity mask
+        dissimilar_mask = np.zeros(n_vertices, dtype=bool)
+        dissimilar_mask[update_mask] = distances > dissimilarity_threshold
+        
+        # Similar mask: vertices that need updating AND are similar
+        similar_mask = update_mask & ~dissimilar_mask
+        
+        # Handle dissimilar observations
+        if np.any(dissimilar_mask):
+            CMesh.confidence[dissimilar_mask] -= vertex_conf_sum[dissimilar_mask]
+            CMesh.confidence[dissimilar_mask] = np.maximum(0, CMesh.confidence[dissimilar_mask])
+            logging.info(f"Rejected {dissimilar_mask.sum()} dissimilar observations (distance > {dissimilarity_threshold}m)")
+        
+        # Handle similar observations: weighted average in observed data
+        if np.any(similar_mask):
+            # Compute total confidence
+            total_conf = CMesh.confidence[similar_mask] + vertex_conf_sum[similar_mask]
+            
+            # Weighted average for observed positions
+            CMesh.observed_positions[similar_mask] = (
+                CMesh.observed_positions[similar_mask] * CMesh.confidence[similar_mask, None] + 
+                vertex_xyz_sum[similar_mask] * vertex_conf_sum[similar_mask, None]
+            ) / total_conf[:, None]
+            
+            # Weighted average for observed colors
+            CMesh.observed_colors[similar_mask] = (
+                CMesh.observed_colors[similar_mask] * CMesh.confidence[similar_mask, None] + 
+                vertex_colors[similar_mask, :3].astype(np.float32) * vertex_conf_sum[similar_mask, None]
+            ) / total_conf[:, None]
+            
+            # Update confidence
+            CMesh.confidence[similar_mask] = total_conf
+    
+    # Clamp confidence values
+    CMesh.confidence[CMesh.confidence > 0.9] = 1.0
+    CMesh.confidence[CMesh.confidence < 0.1] = 0.0
+    
+    # Commit to mesh: vertices that reached confidence = 1.0
+    frozen_mask = CMesh.confidence >= 1.0
+    CMesh.mesh.vertices[frozen_mask] = CMesh.observed_positions[frozen_mask]
+    CMesh.mesh.visual.vertex_colors[frozen_mask, :3] = CMesh.observed_colors[frozen_mask].astype(np.uint8)
+    
+    n_updated = replace_mask.sum() + update_mask.sum()
+    n_frozen = (CMesh.confidence >= 1.0).sum()
+    logging.info(f"Updated {n_updated}/{n_vertices} vertices ({n_frozen} frozen)")
+
+    # For the initial frames, when the mesh is not modified yet, commit the highest-confident points (interio points)
+    if n_frozen == 0:
+        interior_mask = (CMesh.confidence == CMesh.confidence.max())
+        CMesh.mesh.vertices[interior_mask] = CMesh.observed_positions[interior_mask]
+        CMesh.mesh.visual.vertex_colors[interior_mask, :3] = CMesh.observed_colors[interior_mask].astype(np.uint8)
+        logging.info(f"Committed {interior_mask.sum()} interior points to mesh")
+    
+    return CMesh
+
+
+def perform_attachment(est, CMesh, pose, reader, frame_idx):
     """Perform mesh attachment/refinement using current frame observations
     
     Args:
         est: FoundationPose estimator
-        mesh: Current mesh
+        Cmesh: Current MeshWithConfidence
         pose: Current pose estimate
         reader: Data reader
         frame_idx: Current frame index
@@ -303,33 +399,32 @@ def perform_attachment(est, mesh, pose, reader, frame_idx):
         updated_mesh: Refined mesh
     """
     logging.info(f"Performing attachment at frame {frame_idx}")
-    
+
     # Convert observations to mesh frame
-    points_obs, colors_obs = rgb_depth_to_mesh_frame(pose, reader, frame_idx)
+    points_obs, colors_obs, confidence_obs = rgb_depth_to_mesh_frame(pose, reader, frame_idx)
     
     # Find closest mesh vertices
-    tree = KDTree(mesh.vertices)
+    tree = KDTree(CMesh.mesh.vertices)
     distances, indices = tree.query(points_obs)
-    
-    # Update mesh with observations
-    attached_mesh = update_mesh_from_pointcloud(mesh, points_obs, colors_obs, indices)
-    
+
+    # Update mesh with observations (pass frame_idx)
+    CMesh = update_mesh_from_pointcloud(CMesh, points_obs, colors_obs, confidence_obs, indices)
+
     # Smooth the attached mesh
-    smooth_attached_mesh = smooth_mesh_taubin(attached_mesh)
+    CMesh.mesh = smooth_mesh_taubin(CMesh.mesh)
     
     # Reset estimator with new mesh
     est.reset_object(
-        model_pts=smooth_attached_mesh.vertices,
-        model_normals=smooth_attached_mesh.vertex_normals,
-        mesh=smooth_attached_mesh
+        model_pts=CMesh.mesh.vertices,
+        model_normals=CMesh.mesh.vertex_normals,
+        mesh=CMesh.mesh
     )
     
-    return smooth_attached_mesh
+    return CMesh
 
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/instantmesh/mesh.obj')
     parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/demo_data/ho3d_first_frame_instantmeshes/AP14/mesh.obj')
     parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14')
     parser.add_argument('--est_refine_iter', type=int, default=5)
@@ -337,7 +432,8 @@ if __name__=='__main__':
     parser.add_argument('--debug', type=int, default=2)
     parser.add_argument('--debug_dir', type=str, default='debug')
     parser.add_argument('--attach_every_n_frames', type=int, default=2, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
-    parser.add_argument('--boundary_distance_px', type=int, default=20, help='Minimum distance from mask boundary in pixels for attachment (default: 10)')
+    parser.add_argument('--gt_mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj')
+    #parser.add_argument('--boundary_distance_px', type=int, default=30, help='Minimum distance from mask boundary in pixels for attachment (default: 10)')
     args = parser.parse_args()
 
     set_logging_format()
@@ -347,19 +443,24 @@ if __name__=='__main__':
 
     reader = Ho3dReader(video_dir=args.test_scene_dir)
     
-    mesh, _ = estimate_and_scale_mesh(mesh,reader)
+    mesh, _ = estimate_and_scale_mesh(mesh,reader, gt_mesh_file=args.gt_mesh_file)
+
+    CMesh = MeshWithConfidence(mesh)
 
     debug = args.debug
     debug_dir = args.debug_dir
     os.system(f'rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis {debug_dir}/ob_in_cam')
 
-    to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+    log_path = os.path.join(args.debug_dir, 'log.txt')
+    f = open(log_path, "w")
+    
+    to_origin, extents = trimesh.bounds.oriented_bounds(CMesh.mesh)
     bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
 
     scorer = ScorePredictor()
     refiner = PoseRefinePredictor()
     glctx = dr.RasterizeCudaContext()
-    est = FoundationPose(model_pts=mesh.vertices, model_normals=mesh.vertex_normals, mesh=mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
+    est = FoundationPose(model_pts=CMesh.mesh.vertices, model_normals=CMesh.mesh.vertex_normals, mesh=CMesh.mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
     logging.info("estimator initialization done")
 
     for i in range(len(reader.color_files)):
@@ -372,7 +473,7 @@ if __name__=='__main__':
             pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
             
             if debug>=3:
-                m = mesh.copy()
+                m = CMesh.mesh.copy()
                 m.apply_transform(pose)
                 m.export(f'{debug_dir}/model_tf.obj')
                 xyz_map = depth2xyzmap(depth, reader.K)
@@ -380,13 +481,11 @@ if __name__=='__main__':
                 pcd = toOpen3dCloud(xyz_map[valid], color[valid])
                 o3d.io.write_point_cloud(f'{debug_dir}/scene_complete.ply', pcd)
             
-            if args.attach_every_n_frames > 0:
-                mesh = perform_attachment(est, mesh, pose, reader, i)
         else:
             pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
-            
-            if args.attach_every_n_frames > 0 and i % args.attach_every_n_frames == 0:
-                mesh = perform_attachment(est, mesh, pose, reader, i)
+        
+        if args.attach_every_n_frames > 0 and i % args.attach_every_n_frames == 0:
+            CMesh = perform_attachment(est, CMesh, pose, reader, i)
         
         os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
         np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))
@@ -401,4 +500,4 @@ if __name__=='__main__':
             imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
     
     if args.attach_every_n_frames > 0:
-            mesh.export(f'{debug_dir}/attached_mesh.obj')
+        CMesh.mesh.export(f'{debug_dir}/attached_mesh.obj')
