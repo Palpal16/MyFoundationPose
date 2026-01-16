@@ -4,6 +4,7 @@ import trimesh
 import pickle
 import os
 import json
+import argparse
 from pose_metrics import (
     calculate_3d_iou,
     calculate_3d_iou_with_pose,
@@ -15,7 +16,7 @@ from pose_metrics import (
     mspd,
     adi
 )
-
+from datareader import *
 
 
 def pose_to_Rt(pose):
@@ -38,57 +39,28 @@ def transform_pts_Rt(pts, R, t):
     """Transform points using R and t (mimics bop_toolkit_lib.misc.transform_pts_Rt)."""
     return (R @ pts.T + t).T
 
-
-
-if __name__ == '__main__':
-    # ========================================================================
-    # Configuration
-    # ========================================================================
-    gt_mesh_file = '/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj'
-    est_mesh_file = 'debug/attached_mesh.obj'
-    #est_mesh_file = '/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/instantmesh/mesh.obj'
-    pose_file = "/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/ob_in_cams.txt"
-    est_poses_dir = "debug/ob_in_cam/*.txt"
-    meta_file = "/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14/meta/0000.pkl"
-    
-    # Flags
-    use_gt_mesh = False  # Set to True to use single-mesh metrics
-    debug = 0  # 0: normal, 1: print variance and save summary, 2: save per-frame results
-    output_dir = 'debug/evaluation_results'  # Used when debug>=1
-    
-    # ========================================================================
-    # Load camera, symmetries and poses
-    # ========================================================================
-    with open(meta_file, 'rb') as f:
-        meta = pickle.load(f)
-    
-    K = meta['camMat']
-    syms = [{"R": np.eye(3), "t": np.zeros((3, 1))}]
-
-
-    gt_poses = np.loadtxt(pose_file).reshape(-1, 4, 4)
+def evaluate_all_frames(reader, est_mesh, debug_dir, debug, use_gt_mesh=False):
+    est_poses_dir = f"{debug_dir}/ob_in_cam/*.txt"
     est_pose_files = sorted(glob.glob(est_poses_dir))
-    
-    n_frames = min(len(est_pose_files), len(gt_poses))
-    
-    # ========================================================================
-    # Load meshes
-    # ========================================================================
-    gt_mesh = trimesh.load(gt_mesh_file)
+
+    ## Load meshes ##
+    gt_mesh = reader.get_gt_mesh()
     pts_gt_orig = np.array(gt_mesh.vertices, dtype=np.float32)
-    
+
+    if isinstance(est_mesh, str):
+        est_mesh = trimesh.load(est_mesh)
     # Determine if we should use single-mesh (efficient) functions
     if use_gt_mesh:
         pts = pts_gt_orig
         print("Using single-mesh functions (GT mesh)")
     else:
-        est_mesh = trimesh.load(est_mesh_file)
         pts_est_orig = np.array(est_mesh.vertices, dtype=np.float32)
         print("Using two-mesh functions (different meshes)")
     
-    # ========================================================================
-    # Initialize metric storage
-    # ========================================================================
+    ####### HOW SHOULD THIE BE DONE ###########
+    syms = [{"R": np.eye(3), "t": np.zeros((3, 1))}]
+
+    ## Initialize metric storage ##
     metrics = {
         'ADI': 0.0,
         '3D_IOU': 0.0,
@@ -97,22 +69,20 @@ if __name__ == '__main__':
         'MSPD': 0.0
     }
     
-    # For variance calculation and per-frame storage
     if debug >= 1:
         per_frame_metrics = {key: [] for key in metrics.keys()}
-    
-    # Create output directory if debug>=1
-    if debug >= 1:
+        # Create output directory
+        output_dir = f"{debug_dir}/evaluation_results"
         os.makedirs(output_dir, exist_ok=True)
         print(f"Results will be saved to: {output_dir}")
     
-    # ========================================================================
-    # Compute metrics for each frame
-    # ========================================================================
+
+    ## Compute metrics for each frame ##
+    n_frames = len(est_pose_files)
     for i in range(n_frames):
         # Load estimated pose
         est_pose = np.loadtxt(est_pose_files[i]).reshape(4, 4)
-        gt_pose = gt_poses[i]
+        gt_pose = reader.get_gt_pose(i)
         
         # Convert poses to R, t format
         R_est, t_est = pose_to_Rt(est_pose)
@@ -140,7 +110,7 @@ if __name__ == '__main__':
             frame_metrics['MSSD'] = mssd_val
             
             # MSPD metric
-            mspd_val = mspd(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, K=K, pts=pts, syms=syms)
+            mspd_val = mspd(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, K=reader.K, pts=pts, syms=syms)
             frame_metrics['MSPD'] = mspd_val
             
         else:            
@@ -158,7 +128,7 @@ if __name__ == '__main__':
             frame_metrics['MSSD'] = mssd_val
             
             # MSPD metric
-            mspd_val = mspd_est(K, R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig, syms)
+            mspd_val = mspd_est(reader.K, R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig, syms)
             frame_metrics['MSPD'] = mspd_val
         
         # Accumulate metrics
@@ -233,3 +203,17 @@ if __name__ == '__main__':
         print(f"MSPD Variance:                 {metrics['MSPD']:.5f} pixels  ±{std_devs['MSPD']:.4f}")
     
     print(f"{'='*60}\n")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Evaluate pose estimation metrics')
+    parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14')
+    parser.add_argument('--use_gt_mesh', action='store_true', help='Use single-mesh metrics (GT mesh for both GT and estimated)')
+    parser.add_argument('--debug_dir', type=str, default='debug')
+    parser.add_argument('--debug', type=int, default=2, choices=[0, 1, 2], help='Debug level: 0=normal, 1=print variance and save summary, 2=save per-frame results')
+    # 0: normal, 1: print variance and save summary, 2: save per-frame results
+    args = parser.parse_args()
+
+    est_mesh_file = f"{args.debug_dir}/final_mesh.obj"
+
+    reader = Ho3dReader(video_dir=args.test_scene_dir)
+    evaluate_all_frames(reader=reader, est_mesh=est_mesh_file, debug_dir=args.debug_dir, debug=args.debug, use_gt_mesh=args.use_gt_mesh)

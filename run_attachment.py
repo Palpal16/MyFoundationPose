@@ -13,6 +13,7 @@ from scipy.spatial import KDTree
 from scipy.ndimage import distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import pdist
+from evaluate import evaluate_all_frames
 
 def estimate_max_length(depth, mask, K):
     """
@@ -128,7 +129,7 @@ def compute_mesh_diameter(mesh):
     return float(diameter)
 
 
-def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, additional_scale=1.2, gt_mesh_file=None):
+def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, additional_scale=1.2, cheating_scale=True):
     """Estimate mesh scale from depth observation and resize mesh accordingly
     
     Args:
@@ -159,8 +160,8 @@ def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, a
     
     logging.info(f"Mesh scaled to diameter: {compute_mesh_diameter(scaled_mesh):.4f}m")
 
-    if gt_mesh_file:
-       true_mesh_diameter = guessed_mesh_diameter * compute_mesh_diameter(gt_mesh_file) / compute_mesh_diameter(scaled_mesh)
+    if cheating_scale:
+       true_mesh_diameter = guessed_mesh_diameter * compute_mesh_diameter(reader.get_gt_mesh()) / compute_mesh_diameter(scaled_mesh)
     else:
         true_mesh_diameter = guessed_mesh_diameter **2 / compute_mesh_diameter(scaled_mesh)
     rescaled_mesh, _, rescaled_diameter = resize_mesh(scaled_mesh, new_diameter=true_mesh_diameter, reverse=True)
@@ -430,10 +431,10 @@ if __name__=='__main__':
     parser.add_argument('--est_refine_iter', type=int, default=5)
     parser.add_argument('--track_refine_iter', type=int, default=2)
     parser.add_argument('--debug', type=int, default=2)
-    parser.add_argument('--debug_dir', type=str, default='debug')
+    parser.add_argument('--debug_dir', type=str, default='debug/AP14')
+    parser.add_argument('--n_frames', type=int, default=50)
     parser.add_argument('--attach_every_n_frames', type=int, default=2, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
-    parser.add_argument('--gt_mesh_file', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/models/019_pitcher_base/textured_simple.obj')
-    #parser.add_argument('--boundary_distance_px', type=int, default=30, help='Minimum distance from mask boundary in pixels for attachment (default: 10)')
+    parser.add_argument('--evaluation', type=bool, default=True)
     args = parser.parse_args()
 
     set_logging_format()
@@ -443,7 +444,7 @@ if __name__=='__main__':
 
     reader = Ho3dReader(video_dir=args.test_scene_dir)
     
-    mesh, _ = estimate_and_scale_mesh(mesh,reader, gt_mesh_file=args.gt_mesh_file)
+    mesh, _ = estimate_and_scale_mesh(mesh,reader)
 
     CMesh = MeshWithConfidence(mesh)
 
@@ -463,7 +464,7 @@ if __name__=='__main__':
     est = FoundationPose(model_pts=CMesh.mesh.vertices, model_normals=CMesh.mesh.vertex_normals, mesh=CMesh.mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
     logging.info("estimator initialization done")
 
-    for i in range(len(reader.color_files)):
+    for i in range(args.n_frames):
         logging.info(f'i:{i}')
         color = reader.get_color(i)
         depth = reader.get_depth(i)
@@ -499,5 +500,7 @@ if __name__=='__main__':
             os.makedirs(f'{debug_dir}/track_vis', exist_ok=True)
             imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
     
-    if args.attach_every_n_frames > 0:
-        CMesh.mesh.export(f'{debug_dir}/attached_mesh.obj')
+    CMesh.mesh.export(f'{debug_dir}/final_mesh.obj')
+    
+    if args.evaluation:
+        evaluate_all_frames(reader=reader, est_mesh=CMesh.mesh, debug_dir=debug_dir, debug=debug)

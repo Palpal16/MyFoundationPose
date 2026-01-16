@@ -72,8 +72,8 @@ if __name__=='__main__':
       ## cv2.imshow('1', vis[...,::-1])
       ## cv2.waitKey(1)
 
-
     if debug>=2:
       os.makedirs(f'{debug_dir}/track_vis', exist_ok=True)
       imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
 
+  mesh.export(f'{debug_dir}/final_mesh.obj')
