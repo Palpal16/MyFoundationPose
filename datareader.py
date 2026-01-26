@@ -53,7 +53,7 @@ def get_bop_video_dirs(dataset):
   return video_dirs
 
 class Ho3dReader:
-  def __init__(self,video_dir, root_dir='/Experiments/simonep01/demo_data/light_ho3d',downscale=1):
+  def __init__(self,video_dir, root_dir='/Experiments/simonep01/ho3d',downscale=1):
     self.video_dir = video_dir
     self.downscale = downscale
     self.root_dir = root_dir
@@ -92,7 +92,8 @@ class Ho3dReader:
         if mask[...,c].sum()>0:
           mask = mask[...,c]
           break
-    ## ??? The ?hand? mask is sometimes set to 0.5 and reading with INTER_NEAREST, sees it as the object
+    ## ??? The ?hand? mask is sometimes set to 127 and reading with INTER_NEAREST, sees it as the object
+    mask[mask<150]=0
     mask = cv2.resize(mask, (self.W,self.H), interpolation=cv2.INTER_NEAREST).astype(bool).astype(np.uint8)
     if erode:
       kernel = np.ones((3, 3), np.uint8)

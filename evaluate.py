@@ -14,7 +14,8 @@ from pose_metrics import (
     chamfer_distance,
     mssd,
     mspd,
-    adi
+    adi,
+    add
 )
 from datareader import *
 
@@ -206,7 +207,7 @@ def evaluate_all_frames(reader, est_mesh, debug_dir, debug, use_gt_mesh=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Evaluate pose estimation metrics')
-    parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/demo_data/light_ho3d/evaluation/AP14')
+    parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/ho3d/evaluation/AP14')
     parser.add_argument('--use_gt_mesh', action='store_true', help='Use single-mesh metrics (GT mesh for both GT and estimated)')
     parser.add_argument('--debug_dir', type=str, default='debug')
     parser.add_argument('--debug', type=int, default=2, choices=[0, 1, 2], help='Debug level: 0=normal, 1=print variance and save summary, 2=save per-frame results')
