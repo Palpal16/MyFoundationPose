@@ -101,7 +101,7 @@ def resize_mesh(mesh, new_diameter, reverse=False, diameter=None):
       # rot_matrix = np.array([[1, 0, 0, 0], [-1, 0, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
       rot_matrix = np.array([[0, -1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]])
       out_mesh.apply_transform(rot_matrix)
-    return mesh, new_diameter
+    return out_mesh, new_diameter
 
 def compute_mesh_diameter(mesh):
     """Compute mesh diameter using SVD
@@ -137,31 +137,66 @@ def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, a
         estimated_diameter: estimated diameter
     """
     # Estimate diameter from depth observation
-    depth = reader.get_depth(0)
-    mask = reader.get_mask(0).astype(bool)
-    guessed_mesh_diameter = estimate_max_length(depth, mask, reader.K)
-    logging.info(f"Depth + mask diameter, without additional scalining: {guessed_mesh_diameter:.4f}m")
-
-    # Apply constraints and scaling
-    guessed_mesh_diameter = min(guessed_mesh_diameter * scale_factor, max_diameter)
-    guessed_mesh_diameter = guessed_mesh_diameter * additional_scale
-    
-    logging.info(f"Estimated mesh diameter from depth: {guessed_mesh_diameter:.4f}m")
-    
-    # Scale mesh to estimated diameter
-    scaled_mesh, scaled_diameter = resize_mesh(mesh, new_diameter=guessed_mesh_diameter, reverse=True)   ##### Check the reverse
-    
-    logging.info(f"Mesh scaled to diameter: {compute_mesh_diameter(scaled_mesh):.4f}m")
-
     if cheating_scale:
-       true_mesh_diameter = guessed_mesh_diameter * compute_mesh_diameter(reader.get_gt_mesh()) / compute_mesh_diameter(scaled_mesh)
+        
+        gt_diameter, _ = compute_mesh_diameter_and_center(reader.get_gt_mesh().vertices)
+        logging.info(f'gt_diam is : {gt_diameter}')
+        rescaled_mesh, rescaled_diameter = resize_mesh(mesh, new_diameter=gt_diameter, reverse=True)
+        logging.info(f"scaled_mesh diameter: {rescaled_diameter}")
     else:
+        depth = reader.get_depth(0)
+        mask = reader.get_mask(0).astype(bool)
+        guessed_mesh_diameter = estimate_max_length(depth, mask, reader.K)
+        logging.info(f"Depth + mask diameter, without additional scalining: {guessed_mesh_diameter:.4f}m")
+
+        # Apply constraints and scaling
+        guessed_mesh_diameter = min(guessed_mesh_diameter * scale_factor, max_diameter)
+        guessed_mesh_diameter = guessed_mesh_diameter * additional_scale
+        
+        logging.info(f"Estimated mesh diameter from depth: {guessed_mesh_diameter:.4f}m")
+        
+        # Scale mesh to estimated diameter
+        scaled_mesh, scaled_diameter = resize_mesh(mesh, new_diameter=guessed_mesh_diameter, reverse=False)   ##### Check the reverse
+        
+        logging.info(f"Mesh scaled to diameter: {compute_mesh_diameter(scaled_mesh):.4f}m")   ##### Magari cambia compute_mesh con l'altra funzione
+        
         true_mesh_diameter = guessed_mesh_diameter **2 / compute_mesh_diameter(scaled_mesh)
-    rescaled_mesh, rescaled_diameter = resize_mesh(scaled_mesh, new_diameter=true_mesh_diameter, reverse=True)
-    logging.info(f"scaled_mesh diameter: {compute_mesh_diameter(rescaled_mesh)}")
+        rescaled_mesh, rescaled_diameter = resize_mesh(scaled_mesh, new_diameter=true_mesh_diameter, reverse=True)
+        logging.info(f"scaled_mesh diameter: {compute_mesh_diameter(rescaled_mesh)}")
 
     return rescaled_mesh, rescaled_diameter
 
+def my_depth2xyzmap(depth, K, clip_scale=1.5):
+    #Creates the pointcloud from the depth
+    #Removes the points that are too far (threshold = clip_scale * median_depth)
+    H, W = depth.shape[:2]
+    valid_mask = (depth >= 0.05)
+
+    valid_depths = depth[valid_mask]
+    median_depth = np.median(valid_depths)
+    threshold = clip_scale * median_depth
+    
+    depth_mask = valid_mask & (np.abs(depth) <= threshold)
+    
+    vs, us = np.meshgrid(np.arange(0, H), np.arange(0, W), sparse=False, indexing='ij')
+    vs = vs.reshape(-1)
+    us = us.reshape(-1)
+    zs = depth[vs, us]
+    xs = (us - K[0, 2]) * zs / K[0, 0]
+    ys = (vs - K[1, 2]) * zs / K[1, 1]
+    pts = np.stack((xs, ys, zs), axis=1)  # (N, 3)
+    xyz_map = np.zeros((H, W, 3), dtype=np.float32)
+    xyz_map[vs, us] = pts
+    xyz_map[~depth_mask] = 0
+    
+    # Optional: print statistics
+    num_valid = np.sum(valid_mask)
+    num_kept = np.sum(depth_mask)
+    num_clipped = num_valid - num_kept
+    print(f"Median depth: {median_depth:.3f}, Threshold: {threshold:.3f}")
+    print(f"Clipped {num_clipped}/{num_valid} points ({100*num_clipped/num_valid:.1f}%)")
+    
+    return xyz_map
 
 def rgb_depth_to_mesh_frame(pose, reader, frame_idx, boundary_distance_px=35):
     """Convert RGB-D image to point cloud in mesh frame, excluding pixels near mask boundary
@@ -182,7 +217,7 @@ def rgb_depth_to_mesh_frame(pose, reader, frame_idx, boundary_distance_px=35):
     depth[~mask]=0
 
     # Convert depth to 3D points in camera frame
-    xyz_map = depth2xyzmap(depth, reader.K)  # (H,W,3)
+    xyz_map = my_depth2xyzmap(depth, reader.K)  # (H,W,3)
 
     # Compute distance transform: each pixel = distance to nearest mask boundary
     dist_transform = distance_transform_edt(mask)
@@ -451,34 +486,42 @@ def evaluate_frame(gt_mesh, gt_pose, est_mesh, est_pose):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/ho3d/first_frame_instantmeshes/AP14/mesh.obj')
-    parser.add_argument('--test_scene_dir', type=str, default='/Experiments/simonep01/ho3d/evaluation/AP14')
+    #parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/ho3d/first_frame_instantmeshes/AP14/mesh.obj')
+    #parser.add_argument('--mesh_file', type=str, default='/home/simonep01/sam-3d-objects/meshes/MPM10/transformed_mesh.obj')
+    parser.add_argument('--mesh_file', type=str, default=None)
+    parser.add_argument('--video_id', type=str, default='MPM10')
     parser.add_argument('--est_refine_iter', type=int, default=5)
     parser.add_argument('--track_refine_iter', type=int, default=2)
     parser.add_argument('--debug', type=int, default=3)
-    parser.add_argument('--debug_dir', type=str, default='debug/AP14')
-    parser.add_argument('--n_frames', type=int, default=50)
-    parser.add_argument('--attach_every_n_frames', type=int, default=2, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
+    parser.add_argument('--debug_dir', type=str, default='debug')
+    parser.add_argument('--n_frames', type=int, default=800)
+    parser.add_argument('--attach_every_n_frames', type=int, default=8, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
     parser.add_argument('--evaluation', type=bool, default=True)
     args = parser.parse_args()
+
+    if args.mesh_file==None:
+        mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/transformed_mesh.obj'
+
+    test_scene_dir= f'/Experiments/simonep01/ho3d/evaluation/{args.video_id}'
+    debug_dir = f'{args.debug_dir}/{args.video_id}_{args.n_frames}'
+    os.makedirs(debug_dir, exist_ok=True)
 
     set_logging_format()
     set_seed(0)
 
     debug = args.debug
-    debug_dir = args.debug_dir
     os.system(f'rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis {debug_dir}/ob_in_cam')
 
     # Configure logging to write to both console and file
-    log_path = os.path.join(args.debug_dir, 'log.txt')
+    log_path = os.path.join(debug_dir, 'log.txt')
     file_handler = logging.FileHandler(log_path, mode='w')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logging.getLogger().addHandler(file_handler)
 
-    mesh = trimesh.load(args.mesh_file)
+    mesh = trimesh.load(mesh_file)
 
-    reader = Ho3dReader(video_dir=args.test_scene_dir)
+    reader = Ho3dReader(video_dir=test_scene_dir)
     
     mesh, _ = estimate_and_scale_mesh(mesh,reader)
 
@@ -493,11 +536,14 @@ if __name__=='__main__':
     est = FoundationPose(model_pts=CMesh.mesh.vertices, model_normals=CMesh.mesh.vertex_normals, mesh=CMesh.mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
     logging.info("estimator initialization done")
 
-    gt_mesh = reader.get_gt_mesh()
-    metrics_keys = ['ADD', 'ADI', '3D_IOU', 'Chamfer']
-    per_frame_metrics = {key: [] for key in metrics_keys}
+    if args.evaluation:
+        eval_dir = f"{debug_dir}/evaluation_results"
+        os.makedirs(eval_dir, exist_ok=True)
+        gt_mesh = reader.get_gt_mesh()
+        metrics_keys = ['ADD', 'ADI', '3D_IOU', 'Chamfer']
+        per_frame_metrics = {key: [] for key in metrics_keys}
 
-    for i in range(args.n_frames):
+    for i in range(args.n_frames+1):
         logging.info(f'i:{i}')
         color = reader.get_color(i)
         depth = reader.get_depth(i)
@@ -510,9 +556,9 @@ if __name__=='__main__':
             pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
         
         if args.evaluation:
-                frame_metrics = evaluate_frame(gt_mesh, reader.get_gt_pose(i), CMesh.mesh, pose)
-                for key in metrics_keys:
-                    per_frame_metrics[key].append(frame_metrics[key])
+            frame_metrics = evaluate_frame(gt_mesh, reader.get_gt_pose(i), CMesh.mesh, pose)
+            for key in metrics_keys:
+                per_frame_metrics[key].append(frame_metrics[key])
         
         os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
         np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))
@@ -529,6 +575,21 @@ if __name__=='__main__':
         if debug >=3:
             if i in [0,5,20,50,100,200,400,800]:
                 CMesh.save(f'{debug_dir}/debug/mesh_{i}')
+                if args.evaluation and i>50:
+                    summary = {}
+                    for key in metrics_keys:
+                        summary[key] = {
+                            'mean': float(np.mean(per_frame_metrics[key])),
+                            'min': float(np.min(per_frame_metrics[key])),
+                            'max': float(np.max(per_frame_metrics[key]))
+                        }
+                        output_file = os.path.join(eval_dir, f'{key}_per_frame.json')
+                        with open(output_file, 'w') as f:
+                            json.dump([float(x) for x in per_frame_metrics[key]], f, indent=2)
+
+                    summary_file = os.path.join(eval_dir, 'summary.json')
+                    with open(summary_file, 'w') as f:
+                        json.dump(summary, f, indent=2)
 
         if args.attach_every_n_frames > 0 and i % args.attach_every_n_frames == 0:
             CMesh = perform_attachment(est, CMesh, pose, reader, i)
@@ -537,10 +598,7 @@ if __name__=='__main__':
     
     CMesh.mesh.export(f'{debug_dir}/final_mesh.obj')
     
-    if args.evaluation:
-        eval_dir = f"{debug_dir}/evaluation_results"
-        os.makedirs(eval_dir, exist_ok=True)
-        
+    if args.evaluation:        
         summary = {}
         for key in metrics_keys:
             summary[key] = {
