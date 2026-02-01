@@ -13,8 +13,7 @@ from scipy.spatial import KDTree
 from scipy.ndimage import distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import pdist
-from evaluate import evaluate_all_frames
-from pose_metrics import add, adi_est, chamfer_distance
+from pose_metrics import adi_est
 
 def estimate_max_length(depth, mask, K):
     """
@@ -479,9 +478,7 @@ def evaluate_frame(gt_mesh, gt_pose, est_mesh, est_pose):
     R_est, t_est = pose_to_Rt(est_pose)
     R_gt, t_gt = pose_to_Rt(gt_pose)
     frame_metrics = {}
-    frame_metrics['ADD'] = add(R_est=R_est, t_est=t_est, R_gt=R_gt, t_gt=t_gt, pts=pts_gt_orig)
     frame_metrics['3D_IOU'], frame_metrics['ADI'] = adi_est(R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig)
-    frame_metrics['Chamfer'] = chamfer_distance(R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig)
     return frame_metrics
 
 if __name__=='__main__':
@@ -489,21 +486,31 @@ if __name__=='__main__':
     #parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/ho3d/first_frame_instantmeshes/AP14/mesh.obj')
     #parser.add_argument('--mesh_file', type=str, default='/home/simonep01/sam-3d-objects/meshes/MPM10/transformed_mesh.obj')
     parser.add_argument('--mesh_file', type=str, default=None)
-    parser.add_argument('--video_id', type=str, default='MPM10')
+    parser.add_argument('--video_id', type=str, default='SM1')
     parser.add_argument('--est_refine_iter', type=int, default=5)
     parser.add_argument('--track_refine_iter', type=int, default=2)
     parser.add_argument('--debug', type=int, default=3)
-    parser.add_argument('--debug_dir', type=str, default='debug')
-    parser.add_argument('--n_frames', type=int, default=800)
+    parser.add_argument('--debug_dir', type=str, default='debug/attach')
+    parser.add_argument('--n_frames', type=int, default=None)
     parser.add_argument('--attach_every_n_frames', type=int, default=8, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
-    parser.add_argument('--evaluation', type=bool, default=True)
+    parser.add_argument('--evaluation', action='store_false')
     args = parser.parse_args()
 
-    if args.mesh_file==None:
-        mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/transformed_mesh.obj'
-
     test_scene_dir= f'/Experiments/simonep01/ho3d/evaluation/{args.video_id}'
-    debug_dir = f'{args.debug_dir}/{args.video_id}_{args.n_frames}'
+    reader = Ho3dReader(video_dir=test_scene_dir)
+
+    if args.n_frames==None:
+        n_frames = len(reader.color_files)
+    else:
+        n_frames = max(args.n_frames, len(reader.color_files))
+
+    if args.mesh_file==None:
+        mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/reduced_mesh.obj'
+    else:
+        mesh_file = args.mesh_file
+
+
+    debug_dir = f'{args.debug_dir}/{args.video_id}'
     os.makedirs(debug_dir, exist_ok=True)
 
     set_logging_format()
@@ -512,16 +519,10 @@ if __name__=='__main__':
     debug = args.debug
     os.system(f'rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis {debug_dir}/ob_in_cam')
 
-    # Configure logging to write to both console and file
     log_path = os.path.join(debug_dir, 'log.txt')
-    file_handler = logging.FileHandler(log_path, mode='w')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logging.getLogger().addHandler(file_handler)
+    f = open(log_path, "w")
 
     mesh = trimesh.load(mesh_file)
-
-    reader = Ho3dReader(video_dir=test_scene_dir)
     
     mesh, _ = estimate_and_scale_mesh(mesh,reader)
 
@@ -540,10 +541,10 @@ if __name__=='__main__':
         eval_dir = f"{debug_dir}/evaluation_results"
         os.makedirs(eval_dir, exist_ok=True)
         gt_mesh = reader.get_gt_mesh()
-        metrics_keys = ['ADD', 'ADI', '3D_IOU', 'Chamfer']
+        metrics_keys = ['ADI', '3D_IOU']
         per_frame_metrics = {key: [] for key in metrics_keys}
 
-    for i in range(args.n_frames+1):
+    for i in range(n_frames):
         logging.info(f'i:{i}')
         color = reader.get_color(i)
         depth = reader.get_depth(i)
@@ -563,17 +564,17 @@ if __name__=='__main__':
         os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
         np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))
             
-        if debug>=1:
+        if debug>=1 and i%20==0:
             center_pose = pose@np.linalg.inv(to_origin)
             vis = draw_posed_3d_box(reader.K, img=color, ob_in_cam=center_pose, bbox=bbox)
             vis = draw_xyz_axis(color, ob_in_cam=center_pose, scale=0.1, K=reader.K, thickness=3, transparency=0, is_input_rgb=True)
             
-        if debug>=2:
+        if debug>=2 and i%20==0:
             os.makedirs(f'{debug_dir}/track_vis', exist_ok=True)
             imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
 
         if debug >=3:
-            if i in [0,5,20,50,100,200,400,800]:
+            if i in [0,5,20,50,100,200,400,800, 1000, 1300, 1600]:
                 CMesh.save(f'{debug_dir}/debug/mesh_{i}')
                 if args.evaluation and i>50:
                     summary = {}
@@ -616,11 +617,10 @@ if __name__=='__main__':
             json.dump(summary, f, indent=2)
 
         print(f"\n{'='*60}")
-        print(f"Evaluation Results ({args.n_frames} frames)")
+        print(f"Evaluation Results ({n_frames} frames)")
         print(f"{'='*60}")
         print(f"ADI (Average Distance):        {summary['ADI']['mean']:.4f} mm")
         print(f"3D IOU:                        {summary['3D_IOU']['mean']:.3f} %")
-        print(f"Chamfer Distance:              {summary['Chamfer']['mean']:.4f} mm")
 
     logging.info("Processing complete")
-    logging.getLogger().handlers[1].close()
+    f.close()
