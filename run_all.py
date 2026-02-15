@@ -2,19 +2,29 @@ import os
 import subprocess
 from pathlib import Path
 
-methods = ['sam3d', 'fp', 'attach', 'any6d']
-videos = ['SM1', 'SB13', 'AP14', 'MPM10']
+methods = ['fp', 'attach', 'sam3d', 'any6d', 'any6d_ua']
+#methods = ['attach']
+videos = ['AP10','AP11', 'AP12', 'AP13', 'AP14', 'MPM10', 'MPM11', 'MPM12', 'MPM13', 'MPM14', 'SB11', 'SB13', 'SM1']
+#videos = ['AP14', 'MPM10', 'SB13', 'SM1']
 
 for video in videos:
     for method in methods:
-        '''subprocess.run([
-            "python", "run_demo.py",
-            "--video_id", video,
-            "--method", method
-        ])'''
+        print(f"\n{'='*60}")
+        print(f'Running {video} with {method}')
+        print(f"{'='*60}\n")
+        if method == 'attach':
+            subprocess.run([
+                "python", "run_attachment.py",
+                "--video_id", video
+            ])
+        else:
+            subprocess.run([
+                "python", "run_demo.py",
+                "--video_id", video,
+                "--method", method
+            ])
         subprocess.run([
             "python", "make_metrics.py",
             "--video_id", video,
             "--method", method
         ])
-subprocess.run(["python", "analyze_results.py"])

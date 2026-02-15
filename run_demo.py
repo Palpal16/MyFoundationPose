@@ -57,17 +57,8 @@ if __name__=='__main__':
     ob_name = reader.get_ob_name()
     mesh_file = f'/Experiments/simonep01/any6d_meshes/{ob_name}/final_mesh_{ob_name}.obj'
     mesh = trimesh.load(mesh_file)
-  elif args.method == 'cheat_any6d':
-    ob_name = reader.get_ob_name()
-    mesh_file = f'/Experiments/simonep01/any6d_meshes/{ob_name}/final_mesh_{ob_name}.obj'
-    mesh = trimesh.load(mesh_file)
-    mesh, _ = estimate_and_scale_mesh(mesh,reader, cheating_scale=True)
   elif args.method == 'sam3d':
     mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/reduced_mesh.obj'
-    mesh = trimesh.load(mesh_file)
-    mesh, _ = estimate_and_scale_mesh(mesh,reader, cheating_scale=True)
-  elif args.method == 'full_sam3d':
-    mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/transformed_mesh.obj'
     mesh = trimesh.load(mesh_file)
     mesh, _ = estimate_and_scale_mesh(mesh,reader, cheating_scale=True)
 

@@ -492,7 +492,7 @@ if __name__=='__main__':
     parser.add_argument('--debug', type=int, default=3)
     parser.add_argument('--debug_dir', type=str, default='debug/attach')
     parser.add_argument('--n_frames', type=int, default=None)
-    parser.add_argument('--attach_every_n_frames', type=int, default=8, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
+    parser.add_argument('--attach_every_n_frames', type=int, default=10, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
     parser.add_argument('--evaluation', action='store_false')
     args = parser.parse_args()
 
@@ -506,6 +506,7 @@ if __name__=='__main__':
 
     if args.mesh_file==None:
         mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/reduced_mesh.obj'
+        #mesh_file = f'/Experiments/simonep01/ho3d/first_frame_instantmeshes/{args.video_id}/mesh.obj'
     else:
         mesh_file = args.mesh_file
 
@@ -575,7 +576,7 @@ if __name__=='__main__':
 
         if debug >=3:
             if i in [0,5,20,50,100,200,400,800, 1000, 1300, 1600]:
-                CMesh.save(f'{debug_dir}/debug/mesh_{i}')
+                CMesh.save(f'{debug_dir}/modified_meshes/mesh_{i}')
                 if args.evaluation and i>50:
                     summary = {}
                     for key in metrics_keys:
