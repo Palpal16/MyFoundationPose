@@ -127,16 +127,6 @@ def compute_cd(pred_pcd: np.ndarray, gt_pcd, pred_pose: np.ndarray, gt_pose: np.
 def load_est_pose(i_str, debug_dir):
     return np.loadtxt(f'{debug_dir}/ob_in_cam/{i_str}.txt').reshape(4, 4)
 
-def compute_mesh_diameter_and_center(model_pts, n_sample=10000):
-  if n_sample is None:
-    pts = model_pts
-  else:
-    ids = np.random.choice(len(model_pts), size=min(n_sample, len(model_pts)), replace=False)
-    pts = model_pts[ids]
-  dists = np.linalg.norm(pts[None]-pts[:,None], axis=-1)
-  diameter = dists.max()
-  return diameter, model_pts.mean(0)
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--video_id', type=str, default='SM1')
@@ -235,18 +225,6 @@ if __name__ == '__main__':
 
     chamfer_distance = compute_cd(pred_mesh.vertices, gt_mesh.vertices, pred_pose_0, gt_pose_0)
     summary['CD']=float(chamfer_distance*100)  # m to cm
-
-    gt_diameter, _ = compute_mesh_diameter_and_center(gt_mesh.vertices)
-    mesh_diameter, _ = compute_mesh_diameter_and_center(pred_mesh.vertices)
-    summary['Scale'] = (1- abs(mesh_diameter-gt_diameter)/gt_diameter)*100
-    if args.method == 'attach':
-        initial_mesh = trimesh.load(f'{debug_dir}/modified_meshes/mesh_0/mesh.obj')
-        initial_diameter, _ = compute_mesh_diameter_and_center(initial_mesh.vertices)
-        summary['InitialScale'] = (1- abs(initial_diameter-gt_diameter)/gt_diameter)*100
-    if args.method == 'any6d_ua':
-        initial_mesh = trimesh.load(f'{debug_dir}/mesh/model_guess_resized.obj')
-        initial_diameter, _ = compute_mesh_diameter_and_center(initial_mesh.vertices)
-        summary['InitialScale'] = (1- abs(initial_diameter-gt_diameter)/gt_diameter)*100
     
     # Save updated summary
     summary_file = os.path.join(eval_dir, 'summary.json')
@@ -271,10 +249,6 @@ if __name__ == '__main__':
         print(f"3D IOU:                        {summary['3D_IOU']['mean']:.3f} %")
     if 'ADD(S)-0.1' in summary:
         print(f"ADD(S)-0.1:                    {summary['ADD(S)-0.1']:.2f} %")
-    if 'Scale' in summary:
-        print(f"Scale:                         {summary['Scale']:.2f} %")
-    if 'InitialScale' in summary:
-        print(f"Initial Scale:                 {summary['InitialScale']:.2f} %")
     '''if 'R_error' in summary:
         print(f"R_error:                       {summary['R_error']['mean']:.2f} deg")
     if 'T_error' in summary:

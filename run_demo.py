@@ -10,7 +10,7 @@
 from estimater import *
 from datareader import *
 import argparse
-from run_attachment import estimate_and_scale_mesh
+from run_attachment import compute_mesh_diameter_and_center, select_scale_by_score
 
 from pose_metrics import adi_est
 
@@ -50,7 +50,21 @@ if __name__=='__main__':
   debug = args.debug
   os.system(f'rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis {debug_dir}/ob_in_cam')
 
+  # Add file handler for log.txt
+  log_path = os.path.join(debug_dir, 'log.txt')
+  file_handler = logging.FileHandler(log_path)
+  file_handler.setLevel(logging.INFO)
+  file_handler.setFormatter(logging.Formatter('[%(funcName)s()] %(message)s'))
+  logging.getLogger().addHandler(file_handler)
+
   reader = Ho3dReader(video_dir=test_scene_dir)
+
+  logging.disable(logging.CRITICAL)
+  scorer = ScorePredictor()
+  refiner = PoseRefinePredictor()
+  glctx = dr.RasterizeCudaContext()
+  logging.disable(logging.NOTSET)
+
   if args.method == 'fp':
     mesh = reader.get_gt_mesh()
   elif args.method == 'any6d':
@@ -60,28 +74,57 @@ if __name__=='__main__':
   elif args.method == 'sam3d':
     mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/reduced_mesh.obj'
     mesh = trimesh.load(mesh_file)
-    mesh, _ = estimate_and_scale_mesh(mesh,reader, cheating_scale=True)
+    _, center = compute_mesh_diameter_and_center(mesh.vertices)
+    mesh.vertices -= center
+    logging.disable(logging.CRITICAL)
+    est = FoundationPose(
+        model_pts=mesh.vertices,
+        model_normals=mesh.vertex_normals,
+        mesh=mesh,
+        scorer=scorer,
+        refiner=refiner,
+        debug_dir=debug_dir,
+        debug=debug,
+        glctx=glctx,
+    )
+    logging.disable(logging.NOTSET)
+    logging.info("estimator initialization done")
+
+    mesh, best_scale = select_scale_by_score(
+        est=est,
+        reader=reader,
+        scale_hypotheses=np.linspace(0.6, 1.4, 30),   # 30 steps
+        refine_iter=args.est_refine_iter,
+        debug_dir=debug_dir,
+    )
+
+    # ── Save the scaled mesh ──────────────────────────────────────────────────
+    scaled_mesh_path = os.path.join(debug_dir, 'scaled_mesh.obj')
+    mesh.export(scaled_mesh_path)
 
   to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
   bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
 
-  scorer = ScorePredictor()
-  refiner = PoseRefinePredictor()
-  glctx = dr.RasterizeCudaContext()
-  est = FoundationPose(model_pts=mesh.vertices, model_normals=mesh.vertex_normals, mesh=mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
-  logging.info("estimator initialization done")
+  if args.method != 'sam3d':
+    logging.disable(logging.CRITICAL)
+    est = FoundationPose(model_pts=mesh.vertices, model_normals=mesh.vertex_normals, mesh=mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
+    logging.disable(logging.NOTSET)
+    logging.info("estimator initialization done")
 
   if args.evaluation:
     eval_dir = f"{debug_dir}/evaluation_results"
     os.makedirs(eval_dir, exist_ok=True)
     gt_mesh = reader.get_gt_mesh()
+    gt_diameter, _ = compute_mesh_diameter_and_center(reader.get_gt_mesh().vertices)
+    logging.info(f'gt_diam is : {gt_diameter}')
     metrics_keys = ['ADI', '3D_IOU']
     per_frame_metrics = {key: [] for key in metrics_keys}
 
-  for i in range(len(reader.color_files)):
+  for i in range(51):#len(reader.color_files)):
     logging.info(f'i:{i}')
     color = reader.get_color(i)
     depth = reader.get_depth(i)
+    logging.disable(logging.CRITICAL)
     if i==0:
       mask = reader.get_mask(0).astype(bool)
       pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
@@ -96,6 +139,7 @@ if __name__=='__main__':
         o3d.io.write_point_cloud(f'{debug_dir}/scene_complete.ply', pcd)
     else:
       pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
+    logging.disable(logging.NOTSET)
 
     os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
     np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))

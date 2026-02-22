@@ -155,8 +155,7 @@ class FoundationPose:
 
     return center.reshape(3)
 
-
-  def register(self, K, rgb, depth, ob_mask, ob_id=None, glctx=None, iteration=5):
+  def register(self, K, rgb, depth, ob_mask, vis_name='', ob_id=None, glctx=None, iteration=5):
     '''Copmute pose from given pts to self.pcd
     @pts: (N,3) np array, downsampled scene points
     '''
@@ -170,8 +169,9 @@ class FoundationPose:
       else:
         self.glctx = glctx
 
-    depth = erode_depth(depth, radius=2, device='cuda')
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+    xyz_map = get_xyz_map(depth, ob_mask, K)
+    depth = xyz_map[..., -1]
+    valid = (depth >= 0.001) & (ob_mask > 0)
 
     '''if self.debug>=2:
       xyz_map = depth2xyzmap(depth, K)
@@ -181,7 +181,6 @@ class FoundationPose:
       cv2.imwrite(f'{self.debug_dir}/ob_mask.png', (ob_mask*255.0).clip(0,255))'''
 
     normal_map = None
-    valid = (depth>=0.001) & (ob_mask>0)
     if valid.sum()<4:
       logging.info(f'valid too small, return')
       pose = np.eye(4)
@@ -214,11 +213,11 @@ class FoundationPose:
     xyz_map = depth2xyzmap(depth, K)
     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
     if vis is not None:
-      imageio.imwrite(f'{self.debug_dir}/vis_refiner.png', vis)
+      imageio.imwrite(f'{self.debug_dir}/vis_refiner{vis_name}.png', vis)
 
     scores, vis = self.scorer.predict(mesh=self.mesh, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, mesh_tensors=self.mesh_tensors, glctx=self.glctx, mesh_diameter=self.diameter, get_vis=self.debug>=2)
     if vis is not None:
-      imageio.imwrite(f'{self.debug_dir}/vis_score.png', vis)
+      imageio.imwrite(f'{self.debug_dir}/vis_score{vis_name}.png', vis)
 
     add_errs = self.compute_add_err_to_gt_pose(poses)
     logging.info(f"final, add_errs min:{add_errs.min()}")

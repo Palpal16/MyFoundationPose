@@ -200,7 +200,7 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/tables_ou
     os.makedirs(png_dir, exist_ok=True)
 
     # Updated method order: ua before any6d
-    methods = ['fp', 'attach', 'sam3d', 'ua', 'any6d']
+    methods = ['fp', 'attach', 'final', 'sam3d', 'ua', 'any6d']
     videos = ['AP10', 'AP11', 'AP12', 'AP13', 'AP14', 'MPM10', 'MPM11', 'MPM12', 'MPM13', 'MPM14', 'SB11', 'SB13', 'SM1']
     main_metrics = ['ADD(S)', 'ADI', '3D_IOU']
     additional_metrics = ['CD', 'ADD(S)-0.1']
@@ -214,6 +214,8 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/tables_ou
         summary_data[method] = {}
         for video in videos:
             summary_path = os.path.join(base_dir, method, video, 'evaluation_results', 'summary.json')
+            if method == 'final':
+                summary_path = os.path.join('./debug', method, video, 'evaluation_results', 'summary.json')
 
             if os.path.exists(summary_path):
                 with open(summary_path, 'r') as f:
@@ -286,7 +288,7 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/tables_ou
 
 # Usage example:
 if __name__ == "__main__":
-    results = analyze_experiment_results(base_dir='./debug', output_dir='./debug/tables_output')
+    results = analyze_experiment_results(base_dir='/Experiments/simonep01/Results', output_dir='./debug/tables_output')
     print("\n✓ All tables generated successfully!")
     print(f"✓ CSVs saved in: debug/tables_output/csv/")
     print(f"✓ PNGs saved in: debug/tables_output/png/")

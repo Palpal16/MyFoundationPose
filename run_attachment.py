@@ -30,65 +30,6 @@ def evaluate_frame(gt_mesh, gt_pose, est_mesh, est_pose):
     frame_metrics['3D_IOU'], frame_metrics['ADI'] = adi_est(R_est, t_est, pts_est_orig, R_gt, t_gt, pts_gt_orig)
     return frame_metrics
 
-def estimate_max_length(depth, mask, K):
-    """
-    Estimate the maximum length of the projected point cloud from depth, mask, and intrinsic matrix K.
-    
-    Parameters:
-    - depth: (H, W) array representing the depth image
-    - mask: (H, W) array representing the binary mask (1 for valid points, 0 for invalid)
-    - K: (3, 3) array representing the intrinsic camera matrix
-    
-    Returns:
-    - max_length: Maximum length (distance) between two points in the projected point cloud
-    """
-    
-    # Get the height and width of the image
-    H, W = depth.shape
-
-    # Generate pixel coordinates
-    u, v = np.meshgrid(np.arange(W), np.arange(H))
-
-    # Flatten arrays for easier manipulation
-    u_flat = u.flatten()
-    v_flat = v.flatten()
-    depth_flat = depth.flatten()
-    mask_flat = mask.flatten()
-
-    # Filter out points outside the mask (invalid points)
-    valid_indices = (mask_flat > 0) & (depth_flat >= 0.1)
-    u_flat = u_flat[valid_indices]
-    v_flat = v_flat[valid_indices]
-    depth_flat = depth_flat[valid_indices]
-
-    # Apply depth threshold (10cm or large depth)
-    median_depth = np.median(depth_flat)
-    # depth_valid_indices = (depth_flat < median_depth+0.5) & (depth_flat >= 0.1)
-    # u_flat = u_flat[depth_valid_indices]
-    # v_flat = v_flat[depth_valid_indices]
-    # depth_flat = depth_flat[depth_valid_indices]
-
-    # Get intrinsic camera parameters
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-
-    # Reproject pixel coordinates into 3D space
-    X = (u_flat - cx) * median_depth / fx
-    Y = (v_flat - cy) * median_depth / fy
-    Z = depth_flat
-
-    # Compute pairwise distances between points in the X-Y plane (real-world length along the screen)
-    # We only consider X and Y here, ignoring Z for "along the screen" distances
-    points_2d_real_world = np.vstack((X, Y)).T
-
-    # Compute pairwise distances between 2D real-world points
-    distances_2d_real_world = pdist(points_2d_real_world)
-
-    # Find the maximum real-world distance along the screen
-    max_length_real_world = np.max(distances_2d_real_world)
-
-    return max_length_real_world
-
 def compute_mesh_diameter_and_center(model_pts, n_sample=10000):
   if n_sample is None:
     pts = model_pts
@@ -114,76 +55,6 @@ def resize_mesh(mesh, new_diameter, diameter=None):
 
     return out_mesh, new_diameter
 
-
-def estimate_and_scale_mesh(mesh, reader, max_diameter=0.3, scale_factor=1.25, additional_scale=1.2, cheating_scale=True):  ##### This values should be changed
-    """Estimate mesh scale from depth observation and resize mesh accordingly
-    
-    Args:
-        mesh: trimesh object
-        reader: Data reader object
-        max_diameter: maximum expected diameter in meters (default: 0.3)
-        scale_factor: initial scaling factor (default: 1.25)
-        additional_scale: additional scaling factor (default: 1.2)
-        
-    Returns:
-        scaled_mesh: trimesh object scaled to estimated size
-        estimated_diameter: estimated diameter
-    """
-    # Estimate diameter from depth observation
-    if cheating_scale:
-        
-        gt_diameter, _ = compute_mesh_diameter_and_center(reader.get_gt_mesh().vertices)
-        logging.info(f'gt_diam is : {gt_diameter}')
-        rescaled_mesh, rescaled_diameter = resize_mesh(mesh, new_diameter=gt_diameter)
-        logging.info(f"scaled_mesh diameter: {rescaled_diameter}")
-    else:
-        depth = reader.get_depth(0)
-        mask = reader.get_mask(0).astype(bool)
-        guessed_mesh_diameter = estimate_max_length(depth, mask, reader.K)
-        logging.info(f"Depth + mask diameter, without additional scalining: {guessed_mesh_diameter:.4f}m")
-
-        # Apply constraints and scaling
-        guessed_mesh_diameter = min(guessed_mesh_diameter * scale_factor, max_diameter)
-        guessed_mesh_diameter = guessed_mesh_diameter * additional_scale
-        
-        logging.info(f"Estimated mesh diameter from depth: {guessed_mesh_diameter:.4f}m")
-        
-        # Scale mesh to estimated diameter
-        scaled_mesh, scaled_diameter = resize_mesh(mesh, new_diameter=guessed_mesh_diameter)
-        
-        logging.info(f"Mesh scaled to diameter: {compute_mesh_diameter_and_center(scaled_mesh.vertices)[0]:.4f}m")
-        
-        true_mesh_diameter = guessed_mesh_diameter **2 / compute_mesh_diameter_and_center(scaled_mesh.vertices)[0]
-        rescaled_mesh, rescaled_diameter = resize_mesh(scaled_mesh, new_diameter=true_mesh_diameter)
-        logging.info(f"scaled_mesh diameter: {compute_mesh_diameter_and_center(rescaled_mesh.vertices)[0]}")
-
-    return rescaled_mesh, rescaled_diameter
-
-def get_xyz_map(depth, ob_mask, K):
-    depth = erode_depth(depth, radius=2, device='cuda') # Remove noise pixels from depth map
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda') # Makes smoothing, but without smoothing the edges of objects
-    xyz_map = depth2xyzmap(depth, K)
-
-    xyz_map[ob_mask == False] = 0 # Keeps only the object mask
-    points = xyz_map[ob_mask].reshape(-1, 3)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points) # Convert to Open3D point cloud
-    pcd.colors = o3d.utility.Vector3dVector(np.tile([0.529, 0.808, 0.922], (len(pcd.points), 1))) # Gives blue color to the point cloud
-
-    pcd_clean, ind = pcd.remove_statistical_outlier(nb_neighbors=int(points.shape[0] * 0.01), std_ratio=2.0)
-
-    # Filter only 'useful points'
-    valid_indices = np.argwhere(ob_mask)  # Get (h, w) coordinates where ob_mask is True
-    selected_indices = valid_indices[ind]  # Use the indices from the outlier filtering to get (h, w)
-
-    depth_mask = np.zeros((xyz_map.shape[:2]), dtype=bool)
-    depth_mask[selected_indices[:, 0], selected_indices[:, 1]] = True
-    xyz_map[depth_mask == False] = 0
-
-    depth = xyz_map[..., -1]
-    valid = (depth >= 0.001) & (ob_mask > 0)
-    
-    return xyz_map, valid
 
 def smooth_mesh_taubin(mesh, iterations=10, lambda_factor=0.5, mu_factor=-0.53):
     """Apply Taubin smoothing to mesh vertices
@@ -456,7 +327,9 @@ def update_wrong_points(CMesh, pose, reader, frame_idx, less_confidence):
 
     rgb                    = reader.get_color(frame_idx)
     depth_frame            = reader.get_depth(frame_idx)
-    xyz_map, valid_xyz     = get_xyz_map(depth_frame, mask, reader.K)
+    xyz_map     = get_xyz_map(depth_frame, mask, reader.K)    
+    depth = xyz_map[..., -1]
+    valid_xyz = (depth >= 0.001) & (mask > 0)
 
     obs_xyz_cam = xyz_map[uv[:, 1], uv[:, 0]]                         # (N, 3)
     obs_rgb     = rgb[uv[:, 1], uv[:, 0]]                             # (N, 3)
@@ -468,8 +341,8 @@ def update_wrong_points(CMesh, pose, reader, frame_idx, less_confidence):
     # Extra penalty for large depth mismatch before committing
     CMesh.confidence[fg_valid & large_diff] -= 0.35 * less_confidence
 
-    # Commit: small diff OR confidence has crossed -3
-    commit = fg_valid & (~large_diff | (CMesh.confidence < -3.0))      # (N,)
+    # Commit: small diff OR confidence has crossed -2
+    commit = fg_valid & (~large_diff | (CMesh.confidence < -2.0))      # (N,)
 
     cam_in_object = np.linalg.inv(pose)
     obs_world     = transform_pts(obs_xyz_cam[commit], cam_in_object)  # (N_commit, 3)
@@ -500,6 +373,7 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
         
     Returns:
         updated_mesh: Refined mesh
+        Int: if attachment was performed or not and how bad it is (0 yes, 1 no, 5 no and super bad pose)
     """
     logging.info(f"Performing attachment at frame {frame_idx}")
 
@@ -510,7 +384,9 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
     rgb = reader.get_color(frame_idx)
 
     # Convert observations to mesh frame
-    xyz_map, valid_mask = get_xyz_map(depth, ob_mask, reader.K)
+    xyz_map = get_xyz_map(depth, ob_mask, reader.K)
+    depth = xyz_map[..., -1]
+    valid_mask = (depth >= 0.001) & (ob_mask > 0)
     points_cam = xyz_map[valid_mask]  # (N,3)
     # Transform from camera frame to mesh frame
     cam_in_object = np.linalg.inv(pose)
@@ -520,7 +396,7 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
     
     # Mask Projection / Overlap Check: project mesh into image and compute IoU with ob_mask
     iou = 1.0  # default: assume good overlap (e.g. frame 0 or no front-facing vertices)
-    if frame_idx > 100:
+    if frame_idx > 0:
         vertices_cam = transform_pts(CMesh.mesh.vertices, pose)
         # Only consider vertices in front of the camera
         front_mask = vertices_cam[:, 2] > 0
@@ -539,7 +415,9 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
             
             if iou < iou_threshold:
                 logging.warning(f"Skipping attachment: IoU {iou:.3f} < threshold {iou_threshold} (likely bad pose)")
-                return CMesh
+                if iou < iou_threshold/10:
+                    return CMesh, 5
+                return CMesh, 1
 
     less_confidence = 1.0
     if iou < 0.7:
@@ -561,9 +439,11 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
     # Point-to-Mesh Distance Check: skip attachment if median distance is too high (bad pose)
     median_distance = np.median(distances)
     logging.info(f"Point-to-mesh median distance: {median_distance:.4f}m")
-    if frame_idx > 100 and median_distance > distance_threshold:
+    if frame_idx > 0 and median_distance > distance_threshold:
         logging.warning(f"Skipping attachment: median distance {median_distance:.4f}m > threshold {distance_threshold}m (likely bad pose)")
-        return CMesh
+        if median_distance > 10*distance_threshold:
+            return CMesh, 5
+        return CMesh, 1
 
     # Update mesh with observations (pass frame_idx)
     CMesh = update_mesh_from_pointcloud(CMesh, points_obs, colors_obs, confidence_obs, indices)
@@ -573,12 +453,152 @@ def perform_attachment(CMesh, pose, reader, frame_idx, distance_threshold=0.004,
     # Smooth the attached mesh
     CMesh.mesh = smooth_mesh_taubin(CMesh.mesh)
     
-    return CMesh
+    return CMesh, 0
+
+def select_scale_by_score(
+        est,
+        reader,
+        frame_idx: int = 0,
+        scale_hypotheses=None,
+        refine_iter: int = 5,
+        debug_dir: str = None,
+):
+    """Select the best uniform scale factor s in [0.7, 1.3] for the mesh.
+
+    Following Any6D stage-3 logic (register_any6d in Any6D/estimater.py):
+    starting from the coarse pose stored in est.pose_last, a batch of N pose
+    hypotheses is built by composing the coarse pose with uniform scaling matrices
+    diag([s, s, s, 1]).  Because  coarse_pose @ diag([s,s,s,1]) @ [v;1]
+    = coarse_pose @ [s*v; 1], this is mathematically equivalent to evaluating a
+    mesh scaled by s under the same coarse pose — without rebuilding GPU mesh
+    tensors N times.  FoundationPose's refiner and scorer are applied to all
+    candidates in a single batched call; the scale with the highest scorer response
+    is selected and the mesh vertices are multiplied by that factor.
+
+    Args:
+        est:              FoundationPose estimator.  est.pose_last must already
+                          hold the coarse pose (set by a prior est.register() call)
+                          wrt. the internal CENTERED mesh.
+        reader:           Data-reader with get_color / get_depth / get_mask.
+        frame_idx:        Frame to evaluate on (default: 0).
+        scale_hypotheses: 1-D array-like of scale factors to test.
+                          Default: np.linspace(0.7, 1.3, 13)  — 13 steps of 0.05.
+        refine_iter:      Refiner iterations per hypothesis (default: 5).
+        debug_dir:        Optional directory to save debug visualisations.
+
+    Returns:
+        best_mesh   trimesh object; vertices = est.mesh.vertices * best_scale
+        best_scale  float, the winning scale factor
+    """
+    color   = reader.get_color(frame_idx)
+    depth   = reader.get_depth(frame_idx)
+    ob_mask = reader.get_mask(frame_idx).astype(bool)
+
+    logging.info("Running FoundationPose on frame 0 to obtain coarse pose...")
+    logging.disable(logging.CRITICAL)
+    coarse_pose = est.register(
+        K=reader.K, rgb=color, depth=depth, ob_mask=ob_mask,
+        iteration=refine_iter, vis_name = '_coarse'
+    )
+    logging.disable(logging.NOTSET)
+    #coarse_pose = est.pose_last.data.cpu().numpy()
+
+    # =========================================================================
+    # STEP 2 — Evaluate scale hypotheses s ∈ [0.7, 1.3] with the refiner and
+    #          scorer; select the scale with the highest scorer response.
+    # =========================================================================
+    logging.info("Starting scale selection via FoundationPose refiner / scorer...")
+
+    if scale_hypotheses is None:
+        scale_hypotheses = np.linspace(0.6, 1.4, 30)
+    scale_hypotheses = np.asarray(scale_hypotheses, dtype=np.float64)
+    n_scales = len(scale_hypotheses)
+
+    # ── preprocess frame 0 (identical pipeline to FoundationPose.register) ────
+    xyz_map = get_xyz_map(depth, ob_mask, reader.K)
+    depth = xyz_map[..., -1]
+
+    # ── batch of N pose hypotheses: coarse_pose @ diag([s, s, s, 1]) ─────────
+    scaling_matrices = np.array(
+        [np.diag([s, s, s, 1.0]) for s in scale_hypotheses], dtype=np.float64
+    )                                                                # (N, 4, 4)
+    init_transforms = np.einsum(
+        'ij,njk->nik', coarse_pose, scaling_matrices
+    )                                                                # (N, 4, 4)
+
+    logging.info(
+        f"Scale selection: evaluating {n_scales} hypotheses "
+        f"s ∈ [{scale_hypotheses[0]:.2f}, {scale_hypotheses[-1]:.2f}]"
+    )
+
+    # ── refine all hypotheses starting from the coarse pose ───────────────────
+    refined_poses, vis = est.refiner.predict(
+        mesh=est.mesh,
+        mesh_tensors=est.mesh_tensors,
+        rgb=color,
+        depth=depth,
+        K=reader.K,
+        ob_in_cams=init_transforms,
+        normal_map=None,
+        xyz_map=xyz_map,
+        glctx=est.glctx,
+        mesh_diameter=est.diameter,
+        iteration=refine_iter,
+        get_vis=(debug_dir is not None),
+    )
+    if vis is not None and debug_dir:
+        imageio.imwrite(f'{debug_dir}/scale_sel_refiner.png', vis)
+
+    # ── score all refined candidates ──────────────────────────────────────────
+    scores, vis = est.scorer.predict(
+        mesh=est.mesh,
+        rgb=color,
+        depth=depth,
+        K=reader.K,
+        ob_in_cams=refined_poses.data.cpu().numpy(),
+        normal_map=None,
+        mesh_tensors=est.mesh_tensors,
+        glctx=est.glctx,
+        mesh_diameter=est.diameter,
+        get_vis=(debug_dir is not None),
+    )
+    if vis is not None and debug_dir:
+        imageio.imwrite(f'{debug_dir}/scale_sel_scorer.png', vis)
+
+    # ── select best scale ─────────────────────────────────────────────────────
+    scores_np = (
+        scores.detach().cpu().numpy()
+        if hasattr(scores, 'detach')
+        else np.asarray(scores)
+    )
+    best_idx   = int(np.argmax(scores_np))
+    best_scale = float(scale_hypotheses[best_idx])
+
+    for i, (s, sc) in enumerate(zip(scale_hypotheses, scores_np)):
+        marker = '  <-- BEST' if i == best_idx else ''
+        logging.info(f"  scale={s:.3f}  score={sc:.4f}{marker}")
+    logging.info(
+        f"Selected scale factor: {best_scale:.3f}  "
+        f"(score={scores_np[best_idx]:.4f})"
+    )
+
+    # ── apply best scale to the already-centered mesh vertices ────────────────
+    best_mesh = est.mesh.copy()
+    best_mesh.vertices = best_mesh.vertices * best_scale
+
+    est.reset_object(
+        model_pts=best_mesh.vertices,
+        model_normals=best_mesh.vertex_normals,
+        mesh=best_mesh,
+    )
+    logging.info(f"Estimator mesh updated to scale={best_scale:.3f}; "
+                f"new diameter={est.diameter:.4f}m")
+    est.pose_last = None
+
+    return best_mesh, best_scale
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--mesh_file', type=str, default='/Experiments/simonep01/ho3d/first_frame_instantmeshes/AP14/mesh.obj')
-    #parser.add_argument('--mesh_file', type=str, default='/home/simonep01/sam-3d-objects/meshes/MPM10/transformed_mesh.obj')
     parser.add_argument('--mesh_file', type=str, default=None)
     parser.add_argument('--video_id', type=str, default='SM1')
     parser.add_argument('--est_refine_iter', type=int, default=5)
@@ -586,140 +606,176 @@ if __name__=='__main__':
     parser.add_argument('--debug', type=int, default=3)
     parser.add_argument('--debug_dir', type=str, default='debug/butta')
     parser.add_argument('--n_frames', type=int, default=None)
-    parser.add_argument('--attach_every_n_frames', type=int, default=10, help='Perform mesh attachment every N frames (0 = disabled, 1 = every frame, 2 = every other frame, etc.)')
+    parser.add_argument('--attach_every_n_frames', type=int, default=10,
+                        help='Perform mesh attachment every N frames (0=disabled)')
     parser.add_argument('--evaluation', action='store_false')
     args = parser.parse_args()
 
-    test_scene_dir= f'/Experiments/simonep01/ho3d/evaluation/{args.video_id}'
+    test_scene_dir = f'/Experiments/simonep01/ho3d/evaluation/{args.video_id}'
     reader = Ho3dReader(video_dir=test_scene_dir)
+    n_frames = (len(reader.color_files)
+                if args.n_frames is None
+                else min(args.n_frames, len(reader.color_files)))
 
-    n_frames = len(reader.color_files) if args.n_frames is None else min(args.n_frames, len(reader.color_files))
-
-    if args.mesh_file==None:
+    if args.mesh_file is None:
         mesh_file = f'/home/simonep01/sam-3d-objects/meshes/{args.video_id}/reduced_mesh.obj'
-        #mesh_file = f'/Experiments/simonep01/ho3d/first_frame_instantmeshes/{args.video_id}/mesh.obj'
     else:
         mesh_file = args.mesh_file
-
 
     debug_dir = f'{args.debug_dir}/{args.video_id}'
     os.makedirs(debug_dir, exist_ok=True)
 
     set_logging_format()
     set_seed(0)
-
     debug = args.debug
+
     os.system(f'rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis {debug_dir}/ob_in_cam')
 
-    # Add file handler for log.txt
     log_path = os.path.join(debug_dir, 'log.txt')
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter('[%(funcName)s()] %(message)s'))
     logging.getLogger().addHandler(file_handler)
 
+    # ── Load mesh and center it ───────────────────────────────────────────────
+    # Centering is a prerequisite: the scale-search composition
+    #   coarse_pose @ diag([s,s,s,1]) is only equivalent to "mesh*s under
+    #   coarse_pose" when the mesh is centred at the origin.
     mesh = trimesh.load(mesh_file)
-    
-    mesh, _ = estimate_and_scale_mesh(mesh,reader)
+    _, center = compute_mesh_diameter_and_center(mesh.vertices)
+    mesh.vertices -= center
+    logging.info(f"Mesh loaded and centred; file={mesh_file}")
 
-    CMesh = MeshWithConfidence(mesh)
-    
-    to_origin, extents = trimesh.bounds.oriented_bounds(CMesh.mesh)
-    bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
-
+    # ── Shared network instances (reused across all FoundationPose objects) ───
     logging.disable(logging.CRITICAL)
-    scorer = ScorePredictor()
+    scorer  = ScorePredictor()
     refiner = PoseRefinePredictor()
-    glctx = dr.RasterizeCudaContext()
-    est = FoundationPose(model_pts=CMesh.mesh.vertices, model_normals=CMesh.mesh.vertex_normals, mesh=CMesh.mesh, scorer=scorer, refiner=refiner, debug_dir=debug_dir, debug=debug, glctx=glctx)
+    glctx   = dr.RasterizeCudaContext()
+    est = FoundationPose(
+        model_pts=mesh.vertices,
+        model_normals=mesh.vertex_normals,
+        mesh=mesh,
+        scorer=scorer,
+        refiner=refiner,
+        debug_dir=debug_dir,
+        debug=debug,
+        glctx=glctx,
+    )
     logging.disable(logging.NOTSET)
-    logging.info("estimator initialization done")
+    logging.info("Estimator initialised")
+
+    best_mesh, best_scale = select_scale_by_score(
+        est=est,
+        reader=reader,
+        scale_hypotheses=np.linspace(0.6, 1.4, 30),   # 30 steps
+        refine_iter=args.est_refine_iter,
+        debug_dir=debug_dir,
+    )
+
+    # ── Save the scaled mesh ──────────────────────────────────────────────────
+    scaled_mesh_path = os.path.join(debug_dir, 'scaled_mesh.obj')
+    best_mesh.export(scaled_mesh_path)
+
+    CMesh = MeshWithConfidence(best_mesh)
+    to_origin, extents = trimesh.bounds.oriented_bounds(CMesh.mesh)
+    bbox = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
 
     if args.evaluation:
         eval_dir = f"{debug_dir}/evaluation_results"
         os.makedirs(eval_dir, exist_ok=True)
         gt_mesh = reader.get_gt_mesh()
+        gt_diameter, _ = compute_mesh_diameter_and_center(reader.get_gt_mesh().vertices)
+        logging.info(f'gt_diam is : {gt_diameter}')
         metrics_keys = ['ADI', '3D_IOU']
         per_frame_metrics = {key: [] for key in metrics_keys}
 
+    consecutive_attachment_skips = 0
     for i in range(n_frames):
         logging.info(f'i:{i}')
         color = reader.get_color(i)
         depth = reader.get_depth(i)
-        
         logging.disable(logging.CRITICAL)
-        if i==0:
+        if i == 0:
             mask = reader.get_mask(0).astype(bool)
-            pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
-            
+            # First pose: full register with the properly scaled mesh
+            pose = est.register(
+                K=reader.K, rgb=color, depth=depth,
+                ob_mask=mask, iteration=args.est_refine_iter,
+            )
         else:
-            pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
+            if consecutive_attachment_skips >=8:  # ← new branch
+                logging.info(
+                    f"Attachment skipped {consecutive_attachment_skips} times in a row — "
+                    f"using register instead of track at frame {i}"
+                )
+                mask = reader.get_mask(i).astype(bool)
+                pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
+                consecutive_attachment_skips = 0  # reset after forced re-registration
+            else:
+                pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
         logging.disable(logging.NOTSET)
-        
+
         if args.evaluation:
             frame_metrics = evaluate_frame(gt_mesh, reader.get_gt_pose(i), CMesh.mesh, pose)
             for key in metrics_keys:
                 per_frame_metrics[key].append(frame_metrics[key])
-        
+
         os.makedirs(f'{debug_dir}/ob_in_cam', exist_ok=True)
-        np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))
-            
-        if debug>=1 and i%20==0:
-            center_pose = pose@np.linalg.inv(to_origin)
+        np.savetxt(f'{debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4, 4))
+
+        if debug >= 1 and i % 20 == 0:
+            center_pose = pose @ np.linalg.inv(to_origin)
             vis = draw_posed_3d_box(reader.K, img=color, ob_in_cam=center_pose, bbox=bbox)
-            vis = draw_xyz_axis(color, ob_in_cam=center_pose, scale=0.1, K=reader.K, thickness=3, transparency=0, is_input_rgb=True)
-            
-        if debug>=2 and i%20==0:
+            vis = draw_xyz_axis(color, ob_in_cam=center_pose, scale=0.1, K=reader.K,
+                                thickness=3, transparency=0, is_input_rgb=True)
+        if debug >= 2 and i % 20 == 0:
             os.makedirs(f'{debug_dir}/track_vis', exist_ok=True)
             imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
-
-        if debug >=3:
-            if i in [0,5,20,50,100,200,400,800, 1000, 1300, 1600]:
+        if debug >= 3:
+            if i in [0, 5, 20, 50, 100, 200, 400, 800, 1000, 1300, 1600]:
                 CMesh.save(f'{debug_dir}/modified_meshes/mesh_{i}')
-                if args.evaluation and i>50:
-                    summary = {}
-                    for key in metrics_keys:
-                        summary[key] = {
-                            'mean': float(np.mean(per_frame_metrics[key])),
-                            'min': float(np.min(per_frame_metrics[key])),
-                            'max': float(np.max(per_frame_metrics[key]))
-                        }
-                        output_file = os.path.join(eval_dir, f'{key}_per_frame.json')
-                        with open(output_file, 'w') as f:
-                            json.dump([float(x) for x in per_frame_metrics[key]], f, indent=2)
 
-                    summary_file = os.path.join(eval_dir, 'summary.json')
-                    with open(summary_file, 'w') as f:
-                        json.dump(summary, f, indent=2)
+        if args.evaluation and i > 50:
+            summary = {}
+            for key in metrics_keys:
+                summary[key] = {
+                    'mean': float(np.mean(per_frame_metrics[key])),
+                    'min':  float(np.min(per_frame_metrics[key])),
+                    'max':  float(np.max(per_frame_metrics[key])),
+                }
+                output_file = os.path.join(eval_dir, f'{key}_per_frame.json')
+                with open(output_file, 'w') as f:
+                    json.dump([float(x) for x in per_frame_metrics[key]], f, indent=2)
+            summary_file = os.path.join(eval_dir, 'summary.json')
+            with open(summary_file, 'w') as f:
+                json.dump(summary, f, indent=2)
 
         if args.attach_every_n_frames > 0 and i % args.attach_every_n_frames == 0:
-            CMesh = perform_attachment(CMesh, pose, reader, i)
-            # Force recompute normals by invalidating cache
-            CMesh.mesh.vertices = CMesh.mesh.vertices
-            
-            # Reset estimator with new mesh
+            CMesh, skipped = perform_attachment(CMesh, pose, reader, i)
+            if skipped:
+                consecutive_attachment_skips += skipped
+            else:
+                consecutive_attachment_skips = 0  # reset on successful attachment
+            CMesh.mesh.vertices = CMesh.mesh.vertices   # invalidate normal cache
             est.reset_object(
                 model_pts=CMesh.mesh.vertices,
                 model_normals=CMesh.mesh.vertex_normals,
-                mesh=CMesh.mesh
-            )              
+                mesh=CMesh.mesh,
+            )
 
-    
     CMesh.mesh.export(f'{debug_dir}/final_mesh.obj')
-    
-    if args.evaluation:        
+
+    if args.evaluation:
         summary = {}
         for key in metrics_keys:
             summary[key] = {
                 'mean': float(np.mean(per_frame_metrics[key])),
-                'min': float(np.min(per_frame_metrics[key])),
-                'max': float(np.max(per_frame_metrics[key]))
+                'min':  float(np.min(per_frame_metrics[key])),
+                'max':  float(np.max(per_frame_metrics[key])),
             }
-
             output_file = os.path.join(eval_dir, f'{key}_per_frame.json')
             with open(output_file, 'w') as f:
                 json.dump([float(x) for x in per_frame_metrics[key]], f, indent=2)
-
         summary_file = os.path.join(eval_dir, 'summary.json')
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -727,7 +783,7 @@ if __name__=='__main__':
         print(f"\n{'='*60}")
         print(f"Evaluation Results ({n_frames} frames)")
         print(f"{'='*60}")
-        print(f"ADI (Average Distance):        {summary['ADI']['mean']:.4f} m")
-        print(f"3D IOU:                        {summary['3D_IOU']['mean']:.3f} %")
+        print(f"ADI (Average Distance): {summary['ADI']['mean']:.4f} m")
+        print(f"3D IOU: {summary['3D_IOU']['mean']:.3f} %")
 
     logging.info("Processing complete")

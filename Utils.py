@@ -390,7 +390,6 @@ if wp is not None:
     return depth_out
 
 
-
 def depth2xyzmap(depth, K, uvs=None):
   invalid_mask = (depth<0.001)
   H,W = depth.shape[:2]
@@ -410,6 +409,29 @@ def depth2xyzmap(depth, K, uvs=None):
   xyz_map[vs,us] = pts
   xyz_map[invalid_mask] = 0
   return xyz_map
+
+def get_xyz_map(depth, ob_mask, K):
+    depth = erode_depth(depth, radius=2, device='cuda') # Remove noise pixels from depth map
+    depth = bilateral_filter_depth(depth, radius=2, device='cuda') # Makes smoothing, but without smoothing the edges of objects
+    xyz_map = depth2xyzmap(depth, K)
+
+    xyz_map[ob_mask == False] = 0 # Keeps only the object mask
+    points = xyz_map[ob_mask].reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points) # Convert to Open3D point cloud
+    pcd.colors = o3d.utility.Vector3dVector(np.tile([0.529, 0.808, 0.922], (len(pcd.points), 1))) # Gives blue color to the point cloud
+
+    pcd_clean, ind = pcd.remove_statistical_outlier(nb_neighbors=int(points.shape[0] * 0.01), std_ratio=2.0)
+
+    # Filter only 'useful points'
+    valid_indices = np.argwhere(ob_mask)  # Get (h, w) coordinates where ob_mask is True
+    selected_indices = valid_indices[ind]  # Use the indices from the outlier filtering to get (h, w)
+
+    depth_mask = np.zeros((xyz_map.shape[:2]), dtype=bool)
+    depth_mask[selected_indices[:, 0], selected_indices[:, 1]] = True
+    xyz_map[depth_mask == False] = 0
+    
+    return xyz_map
 
 
 def depth2xyzmap_batch(depths, Ks, zfar):
