@@ -11,9 +11,7 @@ METRIC_PROPERTIES = {
     'ADI': {'direction': '↓', 'unit': 'cm', 'higher_is_better': False},
     '3D_IOU': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
     'CD': {'direction': '↓', 'unit': 'cm', 'higher_is_better': False},
-    'ADD(S)-0.1': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
-    'Scale': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
-    'InitialScale': {'direction': '↑', 'unit': '%', 'higher_is_better': True}
+    'ADD(S)-0.1': {'direction': '↑', 'unit': '%', 'higher_is_better': True}
 }
 
 
@@ -100,7 +98,9 @@ def create_summary_table(df, output_path, title, videos=None, summary_metrics=No
     plt.close()
 
 
-def analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_output'):
+def analyze_experiment_results(base_dir, final_base_dir, methods_default, methods_final,
+                               videos, main_metrics, additional_metrics,
+                               output_dir='./debug/plots_output'):
     """
     Analyze and visualize experiment results comparing different methods across videos.
 
@@ -110,10 +110,15 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_out
     - Metric-specific tables (methods x videos) for each metric
     - Overall summary table with all combinations
     - Mean of means summary table across all videos
-    - Special Scale table with InitialScale rows
 
     Parameters:
-    - base_dir: Base directory containing method folders (default: './debug')
+    - base_dir: Base directory containing method folders for methods_default
+    - final_base_dir: Base directory for methods_final
+    - methods_default: List of methods using base_dir
+    - methods_final: List of methods using final_base_dir
+    - videos: List of video names
+    - main_metrics: List of primary metrics to plot
+    - additional_metrics: List of additional metrics for summary tables
     - output_dir: Directory to save plots and tables (default: './debug/plots_output')
 
     Returns:
@@ -126,11 +131,12 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_out
         print(f"✓ Cleaned output directory: {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
 
-    methods = ['fp', 'attach', 'sam3d', 'any6d', 'any6d_ua']
-    videos = ['AP10','AP11', 'AP12', 'AP13', 'AP14', 'MPM10', 'MPM11', 'MPM12', 'MPM13', 'MPM14', 'SB11', 'SB13', 'SM1']
-    main_metrics = ['ADD(S)', 'ADI', '3D_IOU']
-    additional_metrics = ['CD', 'ADD(S)-0.1', 'Scale']
+    methods = methods_default + methods_final
     summary_metrics = main_metrics + additional_metrics
+
+    # Map each method to its base directory
+    method_base_dir = {m: base_dir for m in methods_default}
+    method_base_dir.update({m: final_base_dir for m in methods_final})
 
     # Dictionary to store all data
     metrics_data = {}
@@ -141,8 +147,8 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_out
         metrics_data[method] = {}
         summary_data[method] = {}
         for video in videos:
-            metrics_path = os.path.join(base_dir, method, video, 'evaluation_results', 'metrics.json')
-            summary_path = os.path.join(base_dir, method, video, 'evaluation_results', 'summary.json')
+            metrics_path = os.path.join(method_base_dir[method], method, video, 'evaluation_results', 'metrics.json')
+            summary_path = os.path.join(method_base_dir[method], method, video, 'evaluation_results', 'summary.json')
 
             if os.path.exists(metrics_path):
                 with open(metrics_path, 'r') as f:
@@ -309,39 +315,28 @@ def analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_out
         metric_title = f'{metric} {METRIC_PROPERTIES.get(metric, {}).get("direction", "")} ({METRIC_PROPERTIES.get(metric, {}).get("unit", "")}) - Methods vs Videos'
         create_summary_table(metric_df, metric_output_path, metric_title, videos=None, summary_metrics=None, current_metric=metric)
 
-    # Create special Scale table with InitialScale rows
-    scale_table_data = []
-    for method in methods:
-        # Regular Scale row
-        row = {'Method': method}
-        for video in videos:
-            if summary_data[method][video]:
-                row[video] = summary_data[method][video].get('Scale', np.nan)
-            else:
-                row[video] = np.nan
-        scale_table_data.append(row)
-        
-        # InitialScale row for specific methods
-        if method in ['attach', 'any6d_ua']:
-            initial_row = {'Method': f'{method}_InitialScale'}
-            for video in videos:
-                if summary_data[method][video]:
-                    # Handle both typo versions: 'IniaitlScale' and 'InitialScale'
-                    initial_scale = summary_data[method][video].get('InitialScale', 
-                                   summary_data[method][video].get('IniaitlScale', np.nan))
-                    initial_row[video] = initial_scale
-                else:
-                    initial_row[video] = np.nan
-            scale_table_data.append(initial_row)
-
-    scale_df = pd.DataFrame(scale_table_data)
-    scale_output_path = os.path.join(output_dir, 'metric_table_Scale_with_Initial')
-    scale_title = f'Scale {METRIC_PROPERTIES["Scale"]["direction"]} ({METRIC_PROPERTIES["Scale"]["unit"]}) - Methods vs Videos (with InitialScale)'
-    create_summary_table(scale_df, scale_output_path, scale_title, videos=None, summary_metrics=None, current_metric='Scale')
-
     return overall_df
 
 
 # Usage example:
 if __name__ == "__main__":
-    results = analyze_experiment_results(base_dir='./debug', output_dir='./debug/plots_output')
+    base_dir = '/Experiments/simonep01/Results'
+    final_base_dir = './debug'
+
+    methods_default = ['fp', 'attach', 'sam3d', 'any6d', 'ua']
+    methods_final = ['final']
+
+    videos = ['AP10', 'AP11', 'AP12', 'AP13', 'AP14', 'MPM10', 'MPM11', 'MPM12', 'MPM13', 'MPM14', 'SB11', 'SB13', 'SM1']
+    main_metrics = ['ADD(S)', 'ADI', '3D_IOU']
+    additional_metrics = ['CD', 'ADD(S)-0.1']
+
+    results = analyze_experiment_results(
+        base_dir=base_dir,
+        final_base_dir=final_base_dir,
+        methods_default=methods_default,
+        methods_final=methods_final,
+        videos=videos,
+        main_metrics=main_metrics,
+        additional_metrics=additional_metrics,
+        output_dir=f'{final_base_dir}/plots_output'
+    )

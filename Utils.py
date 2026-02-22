@@ -96,11 +96,6 @@ def set_logging_format(level=logging.INFO):
   FORMAT = '[%(funcName)s()] %(message)s'
   logging.basicConfig(level=level, format=FORMAT)
 
-set_logging_format()
-
-
-
-
 def make_mesh_tensors(mesh, device='cuda', max_tex_size=None):
   mesh_tensors = {}
   if isinstance(mesh.visual, trimesh.visual.texture.TextureVisuals):

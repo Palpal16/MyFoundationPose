@@ -158,3 +158,5 @@ logs/
 run_used.yml
 
 run_all_evaluations.py
+
+other/
