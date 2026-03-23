@@ -76,6 +76,7 @@ if __name__=='__main__':
     mesh = trimesh.load(mesh_file)
     _, center = compute_mesh_diameter_and_center(mesh.vertices)
     mesh.vertices -= center
+
     logging.disable(logging.CRITICAL)
     est = FoundationPose(
         model_pts=mesh.vertices,
@@ -93,14 +94,10 @@ if __name__=='__main__':
     mesh, best_scale = select_scale_by_score(
         est=est,
         reader=reader,
-        scale_hypotheses=np.linspace(0.6, 1.4, 30),   # 30 steps
+        scale_hypotheses=np.linspace(0.8, 1.2, 12),
         refine_iter=args.est_refine_iter,
         debug_dir=debug_dir,
     )
-
-    # ── Save the scaled mesh ──────────────────────────────────────────────────
-    scaled_mesh_path = os.path.join(debug_dir, 'scaled_mesh.obj')
-    mesh.export(scaled_mesh_path)
 
   to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
   bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
@@ -120,7 +117,7 @@ if __name__=='__main__':
     metrics_keys = ['ADI', '3D_IOU']
     per_frame_metrics = {key: [] for key in metrics_keys}
 
-  for i in range(51):#len(reader.color_files)):
+  for i in range(len(reader.color_files)):
     logging.info(f'i:{i}')
     color = reader.get_color(i)
     depth = reader.get_depth(i)

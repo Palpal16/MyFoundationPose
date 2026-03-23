@@ -8,6 +8,7 @@ import os
 import trimesh
 from scipy.spatial import cKDTree
 from Utils import compute_auc_sklearn
+from pose_metrics import calculate_3d_iou, transform_pts_Rt, decompose_pose_matrix
 
 def pose_to_Rt(pose):
     R = pose[:3, :3]
@@ -29,44 +30,6 @@ def calc_pts_diameter(pts):
     if max_dist > diameter:
       diameter = max_dist
   return diameter
-
-def compute_RT_distances(pose1: np.ndarray, pose2: np.ndarray):
-    '''
-    :param RT_1: [B, 4, 4]. homogeneous affine transformation
-    :param RT_2: [B, 4, 4]. homogeneous affine transformation
-    :return: theta: angle difference of R in degree, shift: l2 difference of T in centimeter
-    Works in batched or unbatched manner. NB: assumes that translations are in Meters
-    '''
-
-    if pose1 is None or pose2 is None:
-        return -1
-
-    if len(pose1.shape) == 2:
-        pose1 = np.expand_dims(pose1, axis=0)
-        pose2 = np.expand_dims(pose2, axis=0)
-
-    try:
-        assert np.array_equal(pose1[:, 3, :], pose2[:, 3, :])
-        assert np.array_equal(pose1[0, 3, :], np.array([0, 0, 0, 1]))
-    except AssertionError:
-        print(pose1[:, 3, :], pose2[:, 3, :])
-
-    BS = pose1.shape[0]
-
-    R1 = pose1[:, :3, :3] / np.cbrt(np.linalg.det(pose1[:, :3, :3]))[:, None, None]
-    T1 = pose1[:, :3, 3]
-
-    R2 = pose2[:, :3, :3] / np.cbrt(np.linalg.det(pose2[:, :3, :3]))[:, None, None]
-    T2 = pose2[:, :3, 3]
-
-    R = np.matmul(R1, R2.transpose(0, 2, 1))
-    arccos_arg = (np.trace(R, axis1=1, axis2=2) - 1) / 2
-    arccos_arg = np.clip(arccos_arg, -1 + 1e-12, 1 - 1e-12)
-    theta = np.arccos(arccos_arg) * 180 / np.pi
-    theta[np.isnan(theta)] = 180.
-    shift = np.linalg.norm(T1 - T2, axis=-1) * 100
-
-    return theta, shift
 
 def np_transform_pcd(pcd: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
     pcd = pcd.astype(np.float16)
@@ -130,18 +93,18 @@ def load_est_pose(i_str, debug_dir):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--video_id', type=str, default='SM1')
-    parser.add_argument('--debug_path', type=str, default='/home/simonep01/FoundationPose/debug')
+    parser.add_argument('--debug_path', type=str, default='../My-UA-Pose')#'/Experiments/simonep01/Results')
     parser.add_argument('--method', type=str, default='ua')    
     args = parser.parse_args()
 
     debug_dir = f'{args.debug_path}/{args.method}/{args.video_id}'
     eval_dir = f'{debug_dir}/evaluation_results'
-    sym = args.video_id.startswith('AP')
 
     test_scene_dir = f'/Experiments/simonep01/ho3d/evaluation/{args.video_id}'
     reader = Ho3dReader(test_scene_dir)
     gt_mesh = reader.get_gt_mesh()
     gt_diameter = calc_pts_diameter(np.array(gt_mesh.vertices))
+    print(f'diameter is: {gt_diameter}')
 
     pred_pose_0 = load_est_pose(reader.id_strs[0], debug_dir)
     gt_pose_0 = reader.get_gt_pose(0)
@@ -149,12 +112,8 @@ if __name__ == '__main__':
     pred_mesh = trimesh.load(f'{debug_dir}/final_mesh.obj')        
     
     object_metrics = {
-        'ADD(S)': [], 
-        'R_error': [], 
-        'T_error': [],
-        'RT_5_5': [],
-        'RT_5_10': [],
-        'RT_10_10': []
+        'ADD': [],
+        'ADDS': []
     }
 
     for i in range(len(reader.color_files)):
@@ -162,29 +121,15 @@ if __name__ == '__main__':
         pred_pose_i = load_est_pose(reader.id_strs[i], debug_dir)
         pred_pose = pred_pose_i @ np.linalg.inv(pred_pose_0) @ gt_pose_0
 
-        err_R, err_T = compute_RT_distances(pred_pose, gt_pose)
-        
-        pose_recall_th = [(5, 5), (5, 10), (10, 10)]
-        pose_recalls = []
-        
-        for r_th, t_th in pose_recall_th:
-            succ_r, succ_t = err_R <= r_th, err_T <= t_th
-            succ_pose = np.logical_and(succ_r, succ_t).astype(float)
-            pose_recalls.append(succ_pose)
-        
-        if sym:
-            adds = compute_adds(gt_mesh.vertices, pred_pose, gt_pose)
-        else:
-            adds = compute_add(gt_mesh.vertices, pred_pose, gt_pose)
+        add = compute_add(gt_mesh.vertices, pred_pose, gt_pose)
+        adds = compute_adds(gt_mesh.vertices, pred_pose, gt_pose)
 
-        object_metrics['ADD(S)'].append(float(adds))  # Convert to native Python float
-        object_metrics['R_error'].append(float(err_R[0]))  # Convert from numpy
-        object_metrics['T_error'].append(float(err_T[0]))
-        object_metrics['RT_5_5'].append(float(pose_recalls[0][0]))
-        object_metrics['RT_5_10'].append(float(pose_recalls[1][0]))
-        object_metrics['RT_10_10'].append(float(pose_recalls[2][0]))
+        object_metrics['ADD'].append(float(add))
+        object_metrics['ADDS'].append(float(adds))
 
-    adds_normalized = np.array(object_metrics['ADD(S)']) / gt_diameter
+    add_normalized = np.array(object_metrics['ADD']) / gt_diameter
+    adds_normalized = np.array(object_metrics['ADDS']) / gt_diameter
+    auc_add = compute_auc_sklearn(add_normalized, max_val=0.1)
     auc_adds = compute_auc_sklearn(adds_normalized, max_val=0.1)
     # Load 3D IoU and ADI from run_attachment.py output
     iou_file = os.path.join(eval_dir, '3D_IOU_per_frame.json')
@@ -207,8 +152,14 @@ if __name__ == '__main__':
     summary={}
     for key, values in object_metrics.items():
         if len(values) > 0:
-            # Convert to cm or multiply by 100 for percentage metrics
-            if key in ['ADI', 'ADD(S)', 'RT_5_5', 'RT_5_10', 'RT_10_10']:
+            if key in ['ADD', 'ADDS']:
+                # Save per-frame mean/min/max as _val (in cm)
+                summary[f'{key}_val'] = {
+                    'mean': float(np.mean(values) * 100),
+                    'min': float(np.min(values) * 100),
+                    'max': float(np.max(values) * 100)
+                }
+            elif key == 'ADI':
                 summary[key] = {
                     'mean': float(np.mean(values) * 100),
                     'min': float(np.min(values) * 100),
@@ -221,10 +172,19 @@ if __name__ == '__main__':
                     'max': float(np.max(values))
                 }
 
-    summary['ADD(S)-0.1']=float(auc_adds * 100)
+    # Save AUC as ADD and ADDS
+    summary['ADD']=float(auc_add * 100)
+    summary['ADDS']=float(auc_adds * 100)
 
     chamfer_distance = compute_cd(pred_mesh.vertices, gt_mesh.vertices, pred_pose_0, gt_pose_0)
     summary['CD']=float(chamfer_distance*100)  # m to cm
+
+    # Compute scale: 3D IoU of final_mesh at pred_pose_0 vs gt_mesh at gt_pose_0
+    R_est, t_est = decompose_pose_matrix(pred_pose_0)
+    R_gt, t_gt = decompose_pose_matrix(gt_pose_0)
+    pts_est = transform_pts_Rt(np.array(pred_mesh.vertices), R_est, t_est)
+    pts_gt = transform_pts_Rt(np.array(gt_mesh.vertices), R_gt, t_gt)
+    summary['scale'] = float(calculate_3d_iou(pts_est, pts_gt))
     
     # Save updated summary
     summary_file = os.path.join(eval_dir, 'summary.json')
@@ -241,23 +201,18 @@ if __name__ == '__main__':
     print(f"{'='*60}")
     if 'ADI' in summary:
         print(f"ADI (Average Distance):        {summary['ADI']['mean']:.4f} cm")
-    if 'ADD(S)' in summary:
-        print(f"ADD(S):                        {summary['ADD(S)']['mean']:.2f} cm")
+    if 'ADD_val' in summary:
+        print(f"ADD (mean):                    {summary['ADD_val']['mean']:.2f} cm")
+    if 'ADDS_val' in summary:
+        print(f"ADDS (mean):                   {summary['ADDS_val']['mean']:.2f} cm")
     if 'CD' in summary:
         print(f"Chamfer distance:              {summary['CD']:.2f} cm")
     if '3D_IOU' in summary:
         print(f"3D IOU:                        {summary['3D_IOU']['mean']:.3f} %")
-    if 'ADD(S)-0.1' in summary:
-        print(f"ADD(S)-0.1:                    {summary['ADD(S)-0.1']:.2f} %")
-    '''if 'R_error' in summary:
-        print(f"R_error:                       {summary['R_error']['mean']:.2f} deg")
-    if 'T_error' in summary:
-        print(f"T_error:                       {summary['T_error']['mean']:.2f} cm")
-    if 'RT_5_5' in summary:
-        print(f"RT 5cm/5deg:                   {summary['RT_5_5']['mean']:.2f} %")
-    if 'RT_5_10' in summary:
-        print(f"RT 5cm/10deg:                  {summary['RT_5_10']['mean']:.2f} %")
-    if 'RT_10_10' in summary:
-        print(f"RT 10cm/10deg:                 {summary['RT_10_10']['mean']:.2f} %")'''
-    
+    if 'ADD' in summary:
+        print(f"ADD (AUC):                     {summary['ADD']:.2f} %")
+    if 'ADDS' in summary:
+        print(f"ADDS (AUC):                    {summary['ADDS']:.2f} %")
+    if 'scale' in summary:
+        print(f"Scale (3D IoU):                {summary['scale']:.3f} %")
     print(f"{'='*60}\n")

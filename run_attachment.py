@@ -6,15 +6,89 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import os
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 from estimater import *
 from datareader import *
 from Utils import *
 import argparse
+import json
+import time
 from scipy.spatial import KDTree
 from scipy.ndimage import distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import pdist
 from pose_metrics import adi_est
+import pyrender
+
+# Coordinate system transformation (OpenCV cam → OpenGL cam)
+cvcam_in_glcam = np.array([[1, 0, 0, 0],
+                           [0, -1, 0, 0],
+                           [0, 0, -1, 0],
+                           [0, 0, 0, 1]])
+
+
+def render_mesh_at_pose(mesh, pose, K, H, W, zfar=100):
+    """Render a mesh at a given pose using pyrender.
+
+    Args:
+        mesh: trimesh object
+        pose: 4x4 object-in-camera pose (OpenCV convention)
+        K: 3x3 intrinsic matrix
+        H, W: image dimensions
+        zfar: far clipping plane
+
+    Returns:
+        color: (H, W, 3) uint8 rendered image
+        depth: (H, W) float rendered depth
+    """
+    mesh_transformed = mesh.copy()
+    mesh_transformed.apply_transform(cvcam_in_glcam @ pose)
+
+    scene = pyrender.Scene(ambient_light=[1., 1., 1.], bg_color=[0, 0, 0])
+    camera = pyrender.IntrinsicsCamera(
+        fx=K[0, 0], fy=K[1, 1],
+        cx=K[0, 2], cy=K[1, 2],
+        znear=0.1, zfar=zfar,
+    )
+    scene.add(camera, pose=np.eye(4))
+    pyrender_mesh = pyrender.Mesh.from_trimesh(mesh_transformed, smooth=False)
+    scene.add(pyrender_mesh, pose=np.eye(4))
+
+    renderer = pyrender.OffscreenRenderer(W, H)
+    color, depth = renderer.render(scene, flags=pyrender.RenderFlags.FLAT)
+    renderer.delete()
+    return color, depth
+
+
+def compute_valid_mask(reader, i, K):
+    """Valid-pixel mask from depth processing + object mask."""
+    depth = reader.get_depth(i)
+    ob_mask = reader.get_mask(i).astype(bool)
+    xyz_map = get_xyz_map(depth, ob_mask, K)
+    processed_depth = xyz_map[..., -1]
+    return (processed_depth >= 0.001) & ob_mask
+
+
+def compute_psnr(rgb, rendered, valid_mask):
+    """PSNR (dB) between two images over masked valid pixels.
+
+    Returns float, float('inf') when MSE==0, or None when no valid pixels.
+    """
+    if valid_mask.sum() == 0:
+        return None
+    render_mask = rendered.sum(axis=2) > 0
+    combined_mask = valid_mask & render_mask
+    if combined_mask.sum() == 0:
+        return None
+
+    rgb_masked = rgb[combined_mask].astype(np.float64)
+    rendered_masked = rendered[combined_mask].astype(np.float64)
+    mse = np.mean((rgb_masked - rendered_masked) ** 2)
+    if mse == 0:
+        return float('inf')
+    return float(10.0 * np.log10(255.0 ** 2 / mse))
 
 def pose_to_Rt(pose):
     R = pose[:3, :3]
@@ -39,21 +113,6 @@ def compute_mesh_diameter_and_center(model_pts, n_sample=10000):
   dists = np.linalg.norm(pts[None]-pts[:,None], axis=-1)
   diameter = dists.max()
   return diameter, model_pts.mean(0)
-
-def resize_mesh(mesh, new_diameter, diameter=None):
-    '''
-    It centers and resizes the centered mesh.
-    If reverse, it will rotate the mesh. (Used in the first step to change the coordinate system)
-    '''
-    out_mesh = mesh.copy()
-    if diameter is None:
-      diameter, center = compute_mesh_diameter_and_center(out_mesh.vertices, 10000)
-      out_mesh.vertices -= center
-      logging.info(f"original diameter: {diameter}, new diameter: {new_diameter}")
-
-    out_mesh.vertices *= new_diameter / diameter
-
-    return out_mesh, new_diameter
 
 
 def smooth_mesh_taubin(mesh, iterations=10, lambda_factor=0.5, mu_factor=-0.53):
@@ -463,139 +522,158 @@ def select_scale_by_score(
         refine_iter: int = 5,
         debug_dir: str = None,
 ):
-    """Select the best uniform scale factor s in [0.7, 1.3] for the mesh.
+    """Select the best uniform scale factor using two rounds of FP → scale.
 
-    Following Any6D stage-3 logic (register_any6d in Any6D/estimater.py):
-    starting from the coarse pose stored in est.pose_last, a batch of N pose
-    hypotheses is built by composing the coarse pose with uniform scaling matrices
-    diag([s, s, s, 1]).  Because  coarse_pose @ diag([s,s,s,1]) @ [v;1]
-    = coarse_pose @ [s*v; 1], this is mathematically equivalent to evaluating a
-    mesh scaled by s under the same coarse pose — without rebuilding GPU mesh
-    tensors N times.  FoundationPose's refiner and scorer are applied to all
-    candidates in a single batched call; the scale with the highest scorer response
-    is selected and the mesh vertices are multiplied by that factor.
+    Round 1: wide FoundationPose register + scale search over the full
+             supplied range (default 0.80–1.20 in 15 steps).
+    Round 2: re-register on the already-rescaled mesh + narrower search
+             centred at 1.0 (half the width of Round 1, same step count).
+
+    The returned scale is cumulative (scale_1 × scale_2) relative to the
+    original mesh vertices.
 
     Args:
-        est:              FoundationPose estimator.  est.pose_last must already
-                          hold the coarse pose (set by a prior est.register() call)
-                          wrt. the internal CENTERED mesh.
+        est:              FoundationPose estimator.
         reader:           Data-reader with get_color / get_depth / get_mask.
         frame_idx:        Frame to evaluate on (default: 0).
-        scale_hypotheses: 1-D array-like of scale factors to test.
-                          Default: np.linspace(0.7, 1.3, 13)  — 13 steps of 0.05.
+        scale_hypotheses: 1-D array-like for Round-1 scale factors.
+                          Default: np.linspace(0.80, 1.20, 15).
         refine_iter:      Refiner iterations per hypothesis (default: 5).
         debug_dir:        Optional directory to save debug visualisations.
 
     Returns:
-        best_mesh   trimesh object; vertices = est.mesh.vertices * best_scale
-        best_scale  float, the winning scale factor
+        best_mesh    trimesh object with vertices scaled by scale_1 × scale_2.
+        total_scale  float, cumulative scale relative to the original mesh.
     """
-    color   = reader.get_color(frame_idx)
-    depth   = reader.get_depth(frame_idx)
-    ob_mask = reader.get_mask(frame_idx).astype(bool)
+    color     = reader.get_color(frame_idx)
+    raw_depth = reader.get_depth(frame_idx)
+    ob_mask   = reader.get_mask(frame_idx).astype(bool)
 
-    logging.info("Running FoundationPose on frame 0 to obtain coarse pose...")
-    logging.disable(logging.CRITICAL)
-    coarse_pose = est.register(
-        K=reader.K, rgb=color, depth=depth, ob_mask=ob_mask,
-        iteration=refine_iter, vis_name = '_coarse'
+    # Precompute xyz_map once — it does not change between rounds.
+    xyz_map   = get_xyz_map(raw_depth, ob_mask, reader.K)
+    depth_map = xyz_map[..., -1]
+
+    # ------------------------------------------------------------------
+    def _fp_register(tag: str):
+        """Run est.register() with logging suppressed; return coarse pose."""
+        logging.info(f"Running FoundationPose register ({tag})...")
+        logging.disable(logging.CRITICAL)
+        pose = est.register(
+            K=reader.K, rgb=color, depth=raw_depth, ob_mask=ob_mask,
+            iteration=refine_iter, vis_name=f'_coarse_{tag}',
+        )
+        logging.disable(logging.NOTSET)
+        return pose
+
+    # ------------------------------------------------------------------
+    def _scale_pass(coarse_pose, hypotheses, round_idx: int):
+        """Refine + score N scale hypotheses; apply best; return (mesh, scale)."""
+        hypotheses = np.asarray(hypotheses, dtype=np.float64)
+        n = len(hypotheses)
+
+        scaling_matrices = np.array(
+            [np.diag([s, s, s, 1.0]) for s in hypotheses], dtype=np.float64
+        )                                                        # (N, 4, 4)
+        init_transforms = np.einsum(
+            'ij,njk->nik', coarse_pose, scaling_matrices
+        )                                                        # (N, 4, 4)
+
+        logging.info(
+            f"[Round {round_idx}] Scale selection: evaluating {n} hypotheses "
+            f"s ∈ [{hypotheses[0]:.3f}, {hypotheses[-1]:.3f}]"
+        )
+
+        logging.disable(logging.CRITICAL)
+        # ── refine ───────────────────────────────────────────────────────
+        refined_poses, vis = est.refiner.predict(
+            mesh=est.mesh,
+            mesh_tensors=est.mesh_tensors,
+            rgb=color,
+            depth=depth_map,
+            K=reader.K,
+            ob_in_cams=init_transforms,
+            normal_map=None,
+            xyz_map=xyz_map,
+            glctx=est.glctx,
+            mesh_diameter=est.diameter,
+            iteration=refine_iter,
+            get_vis=(debug_dir is not None),
+        )
+        if vis is not None and debug_dir:
+            imageio.imwrite(
+                f'{debug_dir}/scale_sel_refiner_r{round_idx}.png', vis
+            )
+
+        # ── score ────────────────────────────────────────────────────────
+        scores, vis = est.scorer.predict(
+            mesh=est.mesh,
+            rgb=color,
+            depth=depth_map,
+            K=reader.K,
+            ob_in_cams=refined_poses.data.cpu().numpy(),
+            normal_map=None,
+            mesh_tensors=est.mesh_tensors,
+            glctx=est.glctx,
+            mesh_diameter=est.diameter,
+            get_vis=(debug_dir is not None),
+        )
+        if vis is not None and debug_dir:
+            imageio.imwrite(
+                f'{debug_dir}/scale_sel_scorer_r{round_idx}.png', vis
+            )
+        logging.disable(logging.NOTSET)
+
+        # ── pick best ────────────────────────────────────────────────────
+        scores_np = (
+            scores.detach().cpu().numpy()
+            if hasattr(scores, 'detach')
+            else np.asarray(scores)
+        )
+        best_idx   = int(np.argmax(scores_np))
+        best_scale = float(hypotheses[best_idx])
+
+        logging.info(
+            f"[Round {round_idx}] Selected scale={best_scale:.4f}  "
+            f"(score={scores_np[best_idx]:.4f})"
+        )
+
+        # ── apply scale to mesh & update estimator ────────────────────────
+        best_mesh = est.mesh.copy()
+        best_mesh.vertices = best_mesh.vertices * best_scale
+        est.reset_object(
+            model_pts=best_mesh.vertices,
+            model_normals=best_mesh.vertex_normals,
+            mesh=best_mesh,
+        )
+        logging.info(
+            f"[Round {round_idx}] Mesh updated; new diameter={est.diameter:.4f}m"
+        )
+        est.pose_last = None
+
+        return best_mesh, best_scale
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Round 1 — coarse FP register
+    # ══════════════════════════════════════════════════════════════════════
+    hyp = (
+        np.linspace(0.80, 1.20, 12)
+        if scale_hypotheses is None
+        else np.asarray(scale_hypotheses, dtype=np.float64)
     )
-    logging.disable(logging.NOTSET)
-    #coarse_pose = est.pose_last.data.cpu().numpy()
+    coarse_pose_1      = _fp_register('r1')
+    _, scale_1         = _scale_pass(coarse_pose_1, hyp, round_idx=1)
 
-    # =========================================================================
-    # STEP 2 — Evaluate scale hypotheses s ∈ [0.7, 1.3] with the refiner and
-    #          scorer; select the scale with the highest scorer response.
-    # =========================================================================
-    logging.info("Starting scale selection via FoundationPose refiner / scorer...")
+    # ══════════════════════════════════════════════════════════════════════
+    # Round 2 — re-register on rescaled mesh
+    # ══════════════════════════════════════════════════════════════════════
 
-    if scale_hypotheses is None:
-        scale_hypotheses = np.linspace(0.6, 1.4, 30)
-    scale_hypotheses = np.asarray(scale_hypotheses, dtype=np.float64)
-    n_scales = len(scale_hypotheses)
+    coarse_pose_2      = _fp_register('r2')
+    best_mesh, scale_2 = _scale_pass(coarse_pose_2, hyp, round_idx=2)
 
-    # ── preprocess frame 0 (identical pipeline to FoundationPose.register) ────
-    xyz_map = get_xyz_map(depth, ob_mask, reader.K)
-    depth = xyz_map[..., -1]
+    # ── report cumulative scale ───────────────────────────────────────────
+    total_scale = scale_1 * scale_2
 
-    # ── batch of N pose hypotheses: coarse_pose @ diag([s, s, s, 1]) ─────────
-    scaling_matrices = np.array(
-        [np.diag([s, s, s, 1.0]) for s in scale_hypotheses], dtype=np.float64
-    )                                                                # (N, 4, 4)
-    init_transforms = np.einsum(
-        'ij,njk->nik', coarse_pose, scaling_matrices
-    )                                                                # (N, 4, 4)
-
-    logging.info(
-        f"Scale selection: evaluating {n_scales} hypotheses "
-        f"s ∈ [{scale_hypotheses[0]:.2f}, {scale_hypotheses[-1]:.2f}]"
-    )
-
-    # ── refine all hypotheses starting from the coarse pose ───────────────────
-    refined_poses, vis = est.refiner.predict(
-        mesh=est.mesh,
-        mesh_tensors=est.mesh_tensors,
-        rgb=color,
-        depth=depth,
-        K=reader.K,
-        ob_in_cams=init_transforms,
-        normal_map=None,
-        xyz_map=xyz_map,
-        glctx=est.glctx,
-        mesh_diameter=est.diameter,
-        iteration=refine_iter,
-        get_vis=(debug_dir is not None),
-    )
-    if vis is not None and debug_dir:
-        imageio.imwrite(f'{debug_dir}/scale_sel_refiner.png', vis)
-
-    # ── score all refined candidates ──────────────────────────────────────────
-    scores, vis = est.scorer.predict(
-        mesh=est.mesh,
-        rgb=color,
-        depth=depth,
-        K=reader.K,
-        ob_in_cams=refined_poses.data.cpu().numpy(),
-        normal_map=None,
-        mesh_tensors=est.mesh_tensors,
-        glctx=est.glctx,
-        mesh_diameter=est.diameter,
-        get_vis=(debug_dir is not None),
-    )
-    if vis is not None and debug_dir:
-        imageio.imwrite(f'{debug_dir}/scale_sel_scorer.png', vis)
-
-    # ── select best scale ─────────────────────────────────────────────────────
-    scores_np = (
-        scores.detach().cpu().numpy()
-        if hasattr(scores, 'detach')
-        else np.asarray(scores)
-    )
-    best_idx   = int(np.argmax(scores_np))
-    best_scale = float(scale_hypotheses[best_idx])
-
-    for i, (s, sc) in enumerate(zip(scale_hypotheses, scores_np)):
-        marker = '  <-- BEST' if i == best_idx else ''
-        logging.info(f"  scale={s:.3f}  score={sc:.4f}{marker}")
-    logging.info(
-        f"Selected scale factor: {best_scale:.3f}  "
-        f"(score={scores_np[best_idx]:.4f})"
-    )
-
-    # ── apply best scale to the already-centered mesh vertices ────────────────
-    best_mesh = est.mesh.copy()
-    best_mesh.vertices = best_mesh.vertices * best_scale
-
-    est.reset_object(
-        model_pts=best_mesh.vertices,
-        model_normals=best_mesh.vertex_normals,
-        mesh=best_mesh,
-    )
-    logging.info(f"Estimator mesh updated to scale={best_scale:.3f}; "
-                f"new diameter={est.diameter:.4f}m")
-    est.pose_last = None
-
-    return best_mesh, best_scale
+    return best_mesh, total_scale
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
@@ -664,13 +742,15 @@ if __name__=='__main__':
     logging.disable(logging.NOTSET)
     logging.info("Estimator initialised")
 
+    t_scale_start = time.time()
     best_mesh, best_scale = select_scale_by_score(
         est=est,
         reader=reader,
-        scale_hypotheses=np.linspace(0.6, 1.4, 30),   # 30 steps
+        scale_hypotheses=np.linspace(0.8, 1.2, 12),   # 30 steps
         refine_iter=args.est_refine_iter,
         debug_dir=debug_dir,
     )
+    first_pose_scale_elapsed = time.time() - t_scale_start
 
     # ── Save the scaled mesh ──────────────────────────────────────────────────
     scaled_mesh_path = os.path.join(debug_dir, 'scaled_mesh.obj')
@@ -689,6 +769,13 @@ if __name__=='__main__':
         metrics_keys = ['ADI', '3D_IOU']
         per_frame_metrics = {key: [] for key in metrics_keys}
 
+    # Timing data
+    timing_data = {
+        'first_pose_and_scale_time': None,   # scale selection + first register
+        'attachment_times': [],                # per-attachment wall time (only successful)
+        'tracking_times': [],                  # per-frame tracking wall time
+    }
+
     consecutive_attachment_skips = 0
     for i in range(n_frames):
         logging.info(f'i:{i}')
@@ -698,10 +785,14 @@ if __name__=='__main__':
         if i == 0:
             mask = reader.get_mask(0).astype(bool)
             # First pose: full register with the properly scaled mesh
+            t_first_pose_start = time.time()
             pose = est.register(
                 K=reader.K, rgb=color, depth=depth,
                 ob_mask=mask, iteration=args.est_refine_iter,
             )
+            t_first_pose_end = time.time()
+            print('\n\nONE REGISTER TIME:', t_first_pose_end - t_first_pose_start)
+            timing_data['first_pose_and_scale_time'] = (t_first_pose_end - t_first_pose_start) + first_pose_scale_elapsed
         else:
             if consecutive_attachment_skips >=8:  # ← new branch
                 logging.info(
@@ -712,7 +803,10 @@ if __name__=='__main__':
                 pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
                 consecutive_attachment_skips = 0  # reset after forced re-registration
             else:
+                t_track_start = time.time()
                 pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
+                t_track_end = time.time()
+                timing_data['tracking_times'].append(t_track_end - t_track_start)
         logging.disable(logging.NOTSET)
 
         if args.evaluation:
@@ -751,7 +845,11 @@ if __name__=='__main__':
                 json.dump(summary, f, indent=2)
 
         if args.attach_every_n_frames > 0 and i % args.attach_every_n_frames == 0:
+            t_attach_start = time.time()
             CMesh, skipped = perform_attachment(CMesh, pose, reader, i)
+            t_attach_end = time.time()
+            if not skipped:
+                timing_data['attachment_times'].append(t_attach_end - t_attach_start)
             if skipped:
                 consecutive_attachment_skips += skipped
             else:
@@ -764,6 +862,18 @@ if __name__=='__main__':
             )
 
     CMesh.mesh.export(f'{debug_dir}/final_mesh.obj')
+
+    # Save timing data
+    timing_data['mean_attachment_time'] = float(np.mean(timing_data['attachment_times'])) if timing_data['attachment_times'] else None
+    timing_data['mean_tracking_time'] = float(np.mean(timing_data['tracking_times'])) if timing_data['tracking_times'] else None
+    timing_file = os.path.join(debug_dir, 'timing_data.json')
+    with open(timing_file, 'w') as f:
+        json.dump(timing_data, f, indent=2)
+    logging.info(f"Timing data saved to {timing_file}")
+    print(f"\nTiming Summary:")
+    print(f"  First pose + scale: {timing_data['first_pose_and_scale_time']:.3f} s")
+    print(f"  Attachments: {len(timing_data['attachment_times'])} successful, mean {timing_data['mean_attachment_time']:.3f} s" if timing_data['mean_attachment_time'] else "  Attachments: none successful")
+    print(f"  Tracking: {len(timing_data['tracking_times'])} frames, mean {timing_data['mean_tracking_time']:.4f} s" if timing_data['mean_tracking_time'] else "  Tracking: no frames")
 
     if args.evaluation:
         summary = {}

@@ -7,11 +7,19 @@ import numpy as np
 
 # Define metric properties: direction (↑ higher is better, ↓ lower is better) and units
 METRIC_PROPERTIES = {
-    'ADD(S)': {'direction': '↓', 'unit': 'cm', 'higher_is_better': False},
+    'ADD': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
+    'ADDS': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
     'ADI': {'direction': '↓', 'unit': 'cm', 'higher_is_better': False},
     '3D_IOU': {'direction': '↑', 'unit': '%', 'higher_is_better': True},
     'CD': {'direction': '↓', 'unit': 'cm', 'higher_is_better': False},
-    'ADD(S)-0.1': {'direction': '↑', 'unit': '%', 'higher_is_better': True}
+}
+
+# Properties for per-frame plot labels (ADD/ADDS are distances in plots)
+PLOT_METRIC_PROPERTIES = {
+    'ADD': {'direction': '↓', 'unit': 'cm'},
+    'ADDS': {'direction': '↓', 'unit': 'cm'},
+    'ADI': {'direction': '↓', 'unit': 'cm'},
+    '3D_IOU': {'direction': '↑', 'unit': '%'},
 }
 
 
@@ -99,7 +107,7 @@ def create_summary_table(df, output_path, title, videos=None, summary_metrics=No
 
 
 def analyze_experiment_results(base_dir, final_base_dir, methods_default, methods_final,
-                               videos, main_metrics, additional_metrics,
+                               videos, plot_metrics, main_metrics, additional_metrics,
                                output_dir='./debug/plots_output'):
     """
     Analyze and visualize experiment results comparing different methods across videos.
@@ -117,8 +125,9 @@ def analyze_experiment_results(base_dir, final_base_dir, methods_default, method
     - methods_default: List of methods using base_dir
     - methods_final: List of methods using final_base_dir
     - videos: List of video names
-    - main_metrics: List of primary metrics to plot
-    - additional_metrics: List of additional metrics for summary tables
+    - plot_metrics: List of per-frame metrics to plot (from metrics.json)
+    - main_metrics: List of dict-style metrics in summary (with mean/min/max)
+    - additional_metrics: List of scalar metrics in summary (e.g. AUC values)
     - output_dir: Directory to save plots and tables (default: './debug/plots_output')
 
     Returns:
@@ -166,7 +175,7 @@ def analyze_experiment_results(base_dir, final_base_dir, methods_default, method
     for video in videos:
         os.makedirs(os.path.join(output_dir, video), exist_ok=True)
 
-        for metric in main_metrics:
+        for metric in plot_metrics:
             fig, ax = plt.subplots(1, 1, figsize=(16, 8))
 
             for method in methods:
@@ -184,7 +193,7 @@ def analyze_experiment_results(base_dir, final_base_dir, methods_default, method
 
             ax.set_xlabel('Frame', fontsize=11)
             ax.set_ylabel(metric, fontsize=11)
-            metric_info = f" {METRIC_PROPERTIES[metric]['direction']} ({METRIC_PROPERTIES[metric]['unit']})" if metric in METRIC_PROPERTIES else ""
+            metric_info = f" {PLOT_METRIC_PROPERTIES[metric]['direction']} ({PLOT_METRIC_PROPERTIES[metric]['unit']})" if metric in PLOT_METRIC_PROPERTIES else ""
             ax.set_title(f'Video: {video} - {metric}{metric_info}', fontsize=12, fontweight='bold')
             ax.legend(loc='best')
             ax.grid(True, alpha=0.3)
@@ -202,7 +211,7 @@ def analyze_experiment_results(base_dir, final_base_dir, methods_default, method
             method_folder = os.path.join(output_dir, video, method)
             os.makedirs(method_folder, exist_ok=True)
 
-            for metric in main_metrics:
+            for metric in plot_metrics:
                 fig, ax = plt.subplots(1, 1, figsize=(16, 8))
 
                 if metrics_data['attach'][video] and metric in metrics_data['attach'][video]:
@@ -229,7 +238,7 @@ def analyze_experiment_results(base_dir, final_base_dir, methods_default, method
 
                 ax.set_xlabel('Frame', fontsize=11)
                 ax.set_ylabel(metric, fontsize=11)
-                metric_info = f" {METRIC_PROPERTIES[metric]['direction']} ({METRIC_PROPERTIES[metric]['unit']})" if metric in METRIC_PROPERTIES else ""
+                metric_info = f" {PLOT_METRIC_PROPERTIES[metric]['direction']} ({PLOT_METRIC_PROPERTIES[metric]['unit']})" if metric in PLOT_METRIC_PROPERTIES else ""
                 ax.set_title(f'Video: {video} - {metric}{metric_info} ({method} vs attach)', fontsize=12, fontweight='bold')
                 ax.legend(loc='best')
                 ax.grid(True, alpha=0.3)
@@ -323,12 +332,13 @@ if __name__ == "__main__":
     base_dir = '/Experiments/simonep01/Results'
     final_base_dir = './debug'
 
-    methods_default = ['fp', 'attach', 'sam3d', 'any6d', 'ua']
-    methods_final = ['final']
+    methods_default = ['fp', 'sam3d', 'ua_psnr', 'any6d']
+    methods_final = ['attach']
 
     videos = ['AP10', 'AP11', 'AP12', 'AP13', 'AP14', 'MPM10', 'MPM11', 'MPM12', 'MPM13', 'MPM14', 'SB11', 'SB13', 'SM1']
-    main_metrics = ['ADD(S)', 'ADI', '3D_IOU']
-    additional_metrics = ['CD', 'ADD(S)-0.1']
+    plot_metrics = ['ADD', 'ADDS', 'ADI', '3D_IOU']
+    main_metrics = ['ADI', '3D_IOU']
+    additional_metrics = ['ADD', 'ADDS', 'CD']
 
     results = analyze_experiment_results(
         base_dir=base_dir,
@@ -336,6 +346,7 @@ if __name__ == "__main__":
         methods_default=methods_default,
         methods_final=methods_final,
         videos=videos,
+        plot_metrics=plot_metrics,
         main_metrics=main_metrics,
         additional_metrics=additional_metrics,
         output_dir=f'{final_base_dir}/plots_output'
