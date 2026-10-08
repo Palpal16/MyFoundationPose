@@ -1,4 +1,4 @@
-# MyFoundationPose — Zero-Shot Model-Free 6D Pose Tracking
+# Zero-Shot Model-Free 6D Pose Tracking
 
 This repository contains the code for the thesis *"Zero-shot Model-free 6D Object Pose Estimation in RGB-D Videos"* (Simone Paloschi, Politecnico di Milano, 2025–2026).
 
